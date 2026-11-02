@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-85"
+#define LOADER_MILESTONE "loader-86"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -780,6 +780,15 @@ static void applyLoginDefaults(void) {
 // (its own chat box default is "left:0,bottom:0"), so "centre:0,bottom:0" keeps the bar centred on the design's bottom
 // edge at every scale, which is where the pad's selection marker expects it. The colon is escaped the way the client
 // escapes it in its own file.
+// loader-86: the client limits its own frame rate to 60 as well as asking for vsync. The two pacers fight: the client
+// sleeps until 16.67 ms has passed and only then presents, so a frame whose work ends just after that deadline misses
+// the display's vblank and lands on the next one - a 33 ms frame. The interval log shows exactly that shape (frames at
+// 16-17 ms or at 31-36 ms, nothing in between). The cap is raised out of the way so the client presents the moment its
+// frame is ready and the vblank is the only pacer; vsync still holds the game at 60.
+static void applyFrameCap(void) {
+    bool ok = setSetting("client.graphics.max_fps", "120");
+    say("settings: frame cap 120 (the display's vsync paces the game)%s", ok ? "" : " (not written)");
+}
 static void applyHudDefaults(int surface_height) {
     // loader-77: the stutter grows with the number of players on screen - each one is a set of model draws, and this
     // driver is draw-call bound. Cap how many the client draws; /app0/fewer-players turns it on for a comparison.
@@ -1473,6 +1482,7 @@ static void *workMain(void *argument) {
         loadInterfaceScale();
         applyUiScale(width, height);
         applyLoginDefaults();
+        applyFrameCap();
         applyHudDefaults(height);
         applyPartyFrameAnchor();
         atomic_store(&game_ready, true);
