@@ -41,6 +41,10 @@ fork adds the controller pointer, the interface-size rendering, the framebuffer 
 A folder install keeps the client, settings and logs inside the title's storage and can replace its own
 executable, so updates need nothing but a restart. An image install is read-only; updates stage a new image.
 
+**The title updates itself.** With an update source configured it asks before installing and verifies the
+download against the published SHA-256; a folder install replaces its own executable, so an update is "install,
+close, start again". See [Updating](#updating).
+
 **Each PS5 profile gets its own PokeMMO login and settings.** The client and game files are shared. To switch
 player, close the title, change profile, start it again.
 
@@ -96,6 +100,17 @@ without a per-frame copy. The setting is kept between starts.
 **Triangle** opens Settings at any time. **Settings → Log** shows this start's log, the previous start's log
 and ps5-opengl's own driver log (Square switches between them), with line numbers and live refresh.
 `/app0/pokemmo.log` and `/app0/ps5-opengl.log` can also be fetched over FTP.
+
+### Updating
+
+The loader updates itself, the client updates itself, and nothing is re-installed by hand:
+
+- **Loader:** `/data/pokeupdate.ini` on the console names the release channel (`repo`, optional `asset`, and a
+  read-only `token`). At start the title asks GitHub for the newest release, offers it, and checks the download
+  against the published SHA-256 before replacing its own executable. Close the title and start it again to use
+  the new build. Without that file the check is inert. **Settings → Check for updates** repeats it on demand.
+- **Client:** downloaded and updated by the title from PokeMMO itself, into the slot that is not in use; a
+  client that fails to start is rolled back to the previous one.
 
 ---
 
