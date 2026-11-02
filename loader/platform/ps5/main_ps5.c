@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-76"
+#define LOADER_MILESTONE "loader-77"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -781,6 +781,11 @@ static void applyLoginDefaults(void) {
 // edge at every scale, which is where the pad's selection marker expects it. The colon is escaped the way the client
 // escapes it in its own file.
 static void applyHudDefaults(int surface_height) {
+    // loader-77: the stutter grows with the number of players on screen - each one is a set of model draws, and this
+    // driver is draw-call bound. Cap how many the client draws; /app0/fewer-players turns it on for a comparison.
+    char flag[8];
+    if (readSmall("/app0/fewer-players", flag, sizeof(flag)) && setSetting("client.graphics.max_visible_players", "10"))
+        say("settings: max visible players 10");
     double vh = (double)surface_height / (ui_zoom * (double)linuxSdlRenderScale());
     char chatframe[32];
     snprintf(chatframe, sizeof(chatframe), "%.0f", 34.0 * vh / 1080.0);
