@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-82"
+#define LOADER_MILESTONE "loader-83"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -890,12 +890,12 @@ static void *gameThread(void *argument) {
     atomic_store(&client_started_ns, platformMonotonicNs());
     mark("client.map", RUNNING);
     // loader-82: the client ran with a 640m heap and a 128m young generation - the smallest that a Switch-class port
-    // could get away with - and on this hardware that means G1 collecting constantly and, when it falls behind, pausing
-    // the whole client for 40-140 ms: the frame loss the player could see. The console has memory to spare, so the heap
-    // is three times larger, the young generation is big enough to absorb a zone load, and the pause goal is under a
-    // frame. -Xlog:gc prints one line per collection into the log (client.out), which is how the pauses are checked.
-    static const char *const options[] = {"-XX:MaxHeapSize=2048m", "-XX:MaxNewSize=512m", "-XX:MaxGCPauseMillis=10",
-                                          "-Xlog:gc", NULL};
+    // could get away with - and on this hardware that means the collector running constantly and, when it falls behind,
+    // pausing the whole client for 40-140 ms: the frame loss the player could see. The console has memory to spare, so the
+    // heap is three times larger and the young generation is big enough to absorb a zone load.
+    // The bundled runtime rejects pause-goal flags and -Xlog (loader-82's first build would not start: "Could not find
+    // option 'MaxGCPauseMillis'"), so only the two sizes it already accepted are passed.
+    static const char *const options[] = {"-XX:MaxHeapSize=2048m", "-XX:MaxNewSize=512m", NULL};
     char client_path[400];
     snprintf(client_path, sizeof(client_path), "%s/bin/linux/x64/PokeMMO", active_dir);
     say("client: starting slot %c, revision %s", slot_state.active, active_revision);
