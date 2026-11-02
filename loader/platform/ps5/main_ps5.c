@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-74"
+#define LOADER_MILESTONE "loader-75"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -764,6 +764,12 @@ static void applyLoginDefaults(void) {
 // edge at every scale, which is where the pad's selection marker expects it. The colon is escaped the way the client
 // escapes it in its own file.
 static void applyHudDefaults(int surface_height) {
+    // loader-75: the client's own 60 fps limiter sleeps to hit its target, and that sleep plus the vblank waits that
+    // vsync already does is what leaves the occasional 18-24 ms frame. With the cap raised the client stops sleeping and
+    // vsync alone paces the frames; /app0/fps-high turns it on for a comparison.
+    char flag[8];
+    if (readSmall("/app0/fps-high", flag, sizeof(flag)) && setSetting("client.graphics.max_fps", "120"))
+        say("settings: client FPS cap 120 (vsync paces to the display)");
     double vh = (double)surface_height / (UI_ZOOM * (double)linuxSdlRenderScale());
     char chatframe[32];
     snprintf(chatframe, sizeof(chatframe), "%.0f", 34.0 * vh / 1080.0);

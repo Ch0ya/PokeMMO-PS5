@@ -1239,9 +1239,11 @@ static void (*glTexParameteriReal)(FboEnum, FboEnum, FboInt);
 static FboUint client_target_fbo, client_target_texture, client_target_depth;
 static FboInt client_target_w, client_target_h;
 static _Atomic bool client_target_on;
-static EGLSurface client_surface;        // loader-70: the pbuffer the client draws into above 100%
+static EGLSurface client_surface[2];    // loader-75: two pbuffers, so present reads the previous frame instead of waiting for the one just drawn
+static unsigned client_surface_index;   // the one the client draws into; the other is the read surface and holds the last frame
 static bool client_surface_current;      // the client's context is drawing into it (not the window)
 static unsigned client_surface_w, client_surface_h;
+static bool clientSurfaceActive(void) { return client_surface[0] != EGL_NO_SURFACE; }
 static _Atomic unsigned client_clear_calls, client_depth_clears, client_stencil_enables;
 static void (*glClearReal)(FboEnum);
 static void (*glPushAttribReal)(FboEnum);
@@ -1251,12 +1253,14 @@ static void (*glClearDepthReal)(double);
 static void (*glDisableReal)(FboEnum);
 static bool clientTargetOn(void) { return atomic_load(&client_target_on); }
 static void clientTargetReset(void) {
-    if (client_surface != EGL_NO_SURFACE) {
+    if (clientSurfaceActive()) {
         if (client_surface_current && egl_display != EGL_NO_DISPLAY && egl_context != EGL_NO_CONTEXT)
             eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context);
-        if (egl_display != EGL_NO_DISPLAY) eglDestroySurface(egl_display, client_surface);
+        if (egl_display != EGL_NO_DISPLAY)
+            for (unsigned i = 0; i < 2; ++i) eglDestroySurface(egl_display, client_surface[i]);
     }
-    client_surface = EGL_NO_SURFACE;
+    client_surface[0] = client_surface[1] = EGL_NO_SURFACE;
+    client_surface_index = 0;
     client_surface_current = false;
     client_surface_w = client_surface_h = 0;
     atomic_store(&client_target_on, false);
@@ -1265,22 +1269,29 @@ static void clientTargetReset(void) {
 }
 // loader-70: an EGL pbuffer surface is a real window-system framebuffer to the client (framebuffer 0 is a surface, with the
 // config's depth and stencil, not a user object the loader redirected), and its picture is a render target the driver can
-// copy to a texture on the GPU. The client draws into it; present copies it and draws the copy on the window.
+// copy to a texture on the GPU. loader-75: two of them - the client draws into one while the other is the read surface and
+// holds the previous frame, so the copy never waits for the frame that was just drawn (that wait was ~5 ms of the frame).
 static bool clientSurfaceCreate(FboInt width, FboInt height) {
-    if (client_surface != EGL_NO_SURFACE && client_surface_w == (unsigned)width && client_surface_h == (unsigned)height) return true;
+    if (clientSurfaceActive() && client_surface_w == (unsigned)width && client_surface_h == (unsigned)height) return true;
     if (egl_display == EGL_NO_DISPLAY || !egl_config) return false;
     const EGLint attributes[] = {EGL_WIDTH, (EGLint)width, EGL_HEIGHT, (EGLint)height, EGL_NONE};
-    EGLSurface surface = eglCreatePbufferSurface(egl_display, egl_config, attributes);
-    if (surface == EGL_NO_SURFACE) {
+    EGLSurface first = eglCreatePbufferSurface(egl_display, egl_config, attributes);
+    EGLSurface second = first == EGL_NO_SURFACE ? EGL_NO_SURFACE : eglCreatePbufferSurface(egl_display, egl_config, attributes);
+    if (first == EGL_NO_SURFACE || second == EGL_NO_SURFACE) {
         diagnosticsTrace("client.pbuffer=FAIL size=%dx%d egl_error=0x%x", width, height, eglGetError());
+        if (first != EGL_NO_SURFACE) eglDestroySurface(egl_display, first);
+        if (second != EGL_NO_SURFACE) eglDestroySurface(egl_display, second);
         return false;
     }
-    if (client_surface != EGL_NO_SURFACE) eglDestroySurface(egl_display, client_surface);
-    client_surface = surface;
+    if (clientSurfaceActive())
+        for (unsigned i = 0; i < 2; ++i) eglDestroySurface(egl_display, client_surface[i]);
+    client_surface[0] = first;
+    client_surface[1] = second;
+    client_surface_index = 0;
     client_surface_w = (unsigned)width;
     client_surface_h = (unsigned)height;
-    client_surface_current = egl_context != EGL_NO_CONTEXT && eglMakeCurrent(egl_display, surface, surface, egl_context);
-    diagnosticsTrace("client.pbuffer=ON size=%dx%d current=%d", width, height, client_surface_current ? 1 : 0);
+    client_surface_current = egl_context != EGL_NO_CONTEXT && eglMakeCurrent(egl_display, first, second, egl_context);
+    diagnosticsTrace("client.pbuffer=ON size=%dx%d pair current=%d", width, height, client_surface_current ? 1 : 0);
     return true;
 }
 // Called once the GL context is current and the surface size is known; `width` x `height` is the client's window. The
@@ -1383,7 +1394,7 @@ static void glDrawBufferCompat(FboEnum mode) {
     if (mode == GL_BACK_ && clientTargetBound()) {
         if (atomic_fetch_add(&draw_buffer_maps, 1) < 4) diagnosticsTrace("client.drawbuffer back->attachment0");
         mode = GL_COLOR_ATTACHMENT0_;
-    } else if (mode == GL_BACK_ && client_surface_current && client_surface != EGL_NO_SURFACE) {
+    } else if (mode == GL_BACK_ && client_surface_current && clientSurfaceActive()) {
         mode = GL_FRONT_;  // loader-70: a pbuffer is single-buffered; GL_BACK is not one of its buffers
     }
     real(mode);
@@ -1395,7 +1406,7 @@ static void glReadBufferCompat(FboEnum mode) {
     if (mode == GL_BACK_ && clientTargetBound()) {
         if (atomic_fetch_add(&draw_buffer_maps, 1) < 8) diagnosticsTrace("client.readbuffer back->attachment0");
         mode = GL_COLOR_ATTACHMENT0_;
-    } else if (mode == GL_BACK_ && client_surface_current && client_surface != EGL_NO_SURFACE) {
+    } else if (mode == GL_BACK_ && client_surface_current && clientSurfaceActive()) {
         mode = GL_FRONT_;
     }
     real(mode);
@@ -1445,7 +1456,7 @@ static void glGetIntegervCompat(FboEnum pname, FboInt *data) {
     if (!glGetIntegervReal) return;
     glGetIntegervReal(pname, data);
     if (!clientTargetOn() || !data) return;
-    if (client_surface != EGL_NO_SURFACE && client_surface_current) {
+    if (clientSurfaceActive() && client_surface_current) {
         // loader-70: a pbuffer is single-buffered; the client was given a double-buffered window and selects GL_BACK.
         switch (pname) {
             case GL_DOUBLEBUFFER_: *data = 1; break;
@@ -1762,8 +1773,9 @@ static bool sdlGlMakeCurrent(void *window, void *context) {
         client_surface_current = false;
         return eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     }
-    if (client_surface != EGL_NO_SURFACE) {  // loader-70: the client's context draws into its own surface, not the window
-        client_surface_current = eglMakeCurrent(egl_display, client_surface, client_surface, (EGLContext)context);
+    if (clientSurfaceActive()) {  // loader-70: the client's context draws into its own surface pair, not the window
+        client_surface_current = eglMakeCurrent(egl_display, client_surface[client_surface_index],
+                                                client_surface[1 - client_surface_index], (EGLContext)context);
         return client_surface_current;
     }
     return eglMakeCurrent(egl_display, egl_surface, egl_surface, (EGLContext)context);
@@ -1808,6 +1820,14 @@ void linuxSdlSetLoadingOverlay(void (*draw)(void)) {
 static bool drawLoadingOverlay(unsigned w, unsigned h, unsigned frame) {
     if (!atomic_load(&loading_active)) return false;
     bool timed_out = platformMonotonicNs() - loading_since_ns > 180000000000ull;
+    // loader-75: say so if the client has not shown a picture for 20 s ("stuck on Starting PokeMMO" after an update): the
+    // log then has the moment and the game state, instead of only the session coming after it.
+    static bool slow_logged;
+    if (!slow_logged && platformMonotonicNs() - loading_since_ns > 20000000000ull) {
+        slow_logged = true;
+        diagnosticsTrace("sdl.loading_overlay=SLOW frame=%u elapsed_ms=%llu (no picture yet; Triangle opens Settings > Log)",
+                         frame, (unsigned long long)((platformMonotonicNs() - loading_since_ns) / 1000000ull));
+    }
     // The content check runs after the upscale on present, so even with a render scale the client's picture fills the
     // surface and the points below are its usual relative positions.
     if (timed_out || (frame % 10 == 0 && overlayPictureHasContent(w, h))) {
@@ -2259,7 +2279,7 @@ static bool sdlGlSwapWindow(void *window) {
         unsigned cw, ch;
         clientScreenSize(&cw, &ch);
         uint64_t upscale_began = platformMonotonicNs();
-        if (client_surface != EGL_NO_SURFACE) {
+        if (clientSurfaceActive()) {
             // loader-72: timed in three pieces - the capture (which waits for the client's queued draws), the surface
             // switch, and the upscale draw - because the whole present costs about 5.6 ms of the 16.7 ms frame.
             uint64_t t0 = platformMonotonicNs();
@@ -2304,8 +2324,12 @@ static bool sdlGlSwapWindow(void *window) {
     uint64_t ended = platformMonotonicNs();
     if (ok) applySizeRequest();
     if (ok) clientTargetClearDepth();  // give the client's next frame the depth the window's swap would have given it
-    if (client_surface != EGL_NO_SURFACE && egl_context != EGL_NO_CONTEXT)
-        client_surface_current = eglMakeCurrent(egl_display, client_surface, client_surface, egl_context);  // back to the client's surface
+    if (clientSurfaceActive() && egl_context != EGL_NO_CONTEXT) {
+        // loader-75: draw into the other pbuffer next, and read the one just completed; present will copy that one.
+        unsigned next = 1 - client_surface_index;
+        client_surface_current = eglMakeCurrent(egl_display, client_surface[next], client_surface[client_surface_index], egl_context);
+        client_surface_index = next;
+    }
     unsigned frame = atomic_fetch_add(&frame_counter, 1) + 1;
     noteFrameTime(last_swap_ns && ended > last_swap_ns ? ended - last_swap_ns : 0, ended > began ? ended - began : 0, frame);
     last_swap_ns = ended;
@@ -2326,7 +2350,7 @@ static bool sdlGlSwapWindow(void *window) {
                              atomic_load(&client_depth_clears), atomic_load(&client_clear_calls), atomic_load(&client_stencil_enables));
         if (upscale_calls || upscale_ns)
             diagnosticsTrace("gl.upscale.pace frame=%u calls=%u cpu_ms=%llu", frame, upscale_calls, (unsigned long long)(upscale_ns / 1000000ull));
-        if (client_surface != EGL_NO_SURFACE)
+        if (clientSurfaceActive())
             diagnosticsTrace("gl.present.pace frame=%u capture_ms=%llu switch_ms=%llu draw_ms=%llu", frame,
                              (unsigned long long)(atomic_exchange(&capture_ns, 0) / 1000000ull),
                              (unsigned long long)(atomic_exchange(&switch_ns, 0) / 1000000ull),
