@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-79"
+#define LOADER_MILESTONE "loader-80"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -893,6 +893,13 @@ static void *gameThread(void *argument) {
     char client_path[400];
     snprintf(client_path, sizeof(client_path), "%s/bin/linux/x64/PokeMMO", active_dir);
     say("client: starting slot %c, revision %s", slot_state.active, active_revision);
+    // loader-80: enable the driver's shader cache only now - after the loader's own overlay shaders (loading screen, menu)
+    // are compiled - so only the client's shader variants use it. Enabling it before the menu drew crashed the driver with
+    // a signal 11; the client's ~64 runtime variants are the ones that cause the hitches. The directory is in the title's
+    // writable storage, so it persists between starts.
+    mkdir("/download0/shader-cache", 0755);
+    setenv("PS5_SHADER_CACHE_DIR", "/download0/shader-cache", 1);
+    say("shaders: client cache in /download0/shader-cache");
     GameConfig config = {.root = ROOT,
                          .client_path = client_path,
                          // The game sees its folder as /game: the active slot, with the shared settings over /game/config. The C++
