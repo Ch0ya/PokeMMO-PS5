@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-75"
+#define LOADER_MILESTONE "loader-76"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -725,24 +725,41 @@ static bool setSetting(const char *key, const char *value) { return setSettingAt
 // client reports in its own log (linux_sdl.c's client_ui_scale, read from "uiViewportScale:"), so the loader's marker and
 // battle hints stay on it.
 #define UI_ZOOM 2.1
+static unsigned interface_scale = 100;  // the interface size in percent (loader-45); defined here for applyUiScale below
+static double ui_zoom = UI_ZOOM;  // the zoom the client is actually asked for (loader-76: a lower output can carry the size itself)
 static void interfaceViewport(int surface_width, int surface_height, double *vw, double *vh) {
     double scale = (double)linuxSdlRenderScale();
-    *vw = (double)surface_width / (UI_ZOOM * scale);
-    *vh = (double)surface_height / (UI_ZOOM * scale);
+    *vw = (double)surface_width / (ui_zoom * scale);
+    *vh = (double)surface_height / (ui_zoom * scale);
 }
 static void applyUiScale(int surface_width, int surface_height) {
     if (surface_width < 1 || surface_height < 1) return;
+    double requested = (double)interface_scale / 100.0;
+    double zoom, scale;
+    if (surface_height < 2000) {
+        // loader-76: at a lower output (1440p) the client's own zoom can carry the interface size - its cap is 2.0, and
+        // 2.0 * 1440/2160 * 1.5 = 2.0 exactly. The window is then the whole surface (render scale 1), so there is no
+        // upscale at all and the frame renders a third fewer pixels; the apparent size matches 4K at the same setting.
+        zoom = 2.0 * ((double)surface_height / 2160.0) * requested;
+        if (zoom > 2.0) zoom = 2.0;
+        scale = 1.0;
+    } else {
+        // 4K: the client clamps its zoom at 2.0, so the smaller window plus the upscale is what enlarges the interface.
+        zoom = UI_ZOOM;
+        scale = requested;
+    }
+    ui_zoom = zoom;
+    linuxSdlSetRenderScale((float)scale);
     double vw, vh;
     interfaceViewport(surface_width, surface_height, &vw, &vh);
-    double scale = (double)linuxSdlRenderScale();
-    char zoom[32], surface_w[16], surface_h[16];
-    snprintf(zoom, sizeof(zoom), "%.4g", (double)UI_ZOOM);
+    char zoom_text[32], surface_w[16], surface_h[16];
+    snprintf(zoom_text, sizeof(zoom_text), "%.4g", zoom);
     // loader-66: the same even rounding clientScreenSize gives the client's window (see linux_sdl.c).
     snprintf(surface_w, sizeof(surface_w), "%d", (int)((double)surface_width / scale + 0.5) & ~1);
     snprintf(surface_h, sizeof(surface_h), "%d", (int)((double)surface_height / scale + 0.5) & ~1);
-    bool ok = setSetting("client.gui.scale.ui_zoom2", zoom) && setSetting("client.graphics.width", surface_w) &&
+    bool ok = setSetting("client.gui.scale.ui_zoom2", zoom_text) && setSetting("client.graphics.width", surface_w) &&
               setSetting("client.graphics.height", surface_h);
-    say("settings: ui_zoom2=%s for %dx%d (interface %.0f%%, design viewport %.0fx%.0f)%s", zoom, surface_width, surface_height, scale * 100.0,
+    say("settings: ui_zoom2=%s for %dx%d (interface %.0f%%, design viewport %.0fx%.0f)%s", zoom_text, surface_width, surface_height, scale * 100.0,
         vw, vh, ok ? "" : " (some values not written)");
 }
 // The login screen's "Remember Me" (client.ui.login.auto) does not stay set: the client rewrites main.properties itself
@@ -764,13 +781,7 @@ static void applyLoginDefaults(void) {
 // edge at every scale, which is where the pad's selection marker expects it. The colon is escaped the way the client
 // escapes it in its own file.
 static void applyHudDefaults(int surface_height) {
-    // loader-75: the client's own 60 fps limiter sleeps to hit its target, and that sleep plus the vblank waits that
-    // vsync already does is what leaves the occasional 18-24 ms frame. With the cap raised the client stops sleeping and
-    // vsync alone paces the frames; /app0/fps-high turns it on for a comparison.
-    char flag[8];
-    if (readSmall("/app0/fps-high", flag, sizeof(flag)) && setSetting("client.graphics.max_fps", "120"))
-        say("settings: client FPS cap 120 (vsync paces to the display)");
-    double vh = (double)surface_height / (UI_ZOOM * (double)linuxSdlRenderScale());
+    double vh = (double)surface_height / (ui_zoom * (double)linuxSdlRenderScale());
     char chatframe[32];
     snprintf(chatframe, sizeof(chatframe), "%.0f", 34.0 * vh / 1080.0);
     bool ok = setSetting("client.gui.hud.chatframe.height", chatframe);
@@ -812,7 +823,7 @@ static void applyPartyFrameAnchor(void) {
 #define INTERFACE_SCALE_MAX 150u
 #define INTERFACE_SCALE_STEP 5u
 #define INTERFACE_SCALE ROOT "/interface-scale"
-static unsigned interface_scale = INTERFACE_SCALE_MIN;
+
 static unsigned clampInterfacePercent(unsigned value) {
     if (value < INTERFACE_SCALE_MIN) value = INTERFACE_SCALE_MIN;
     if (value > INTERFACE_SCALE_MAX) value = INTERFACE_SCALE_MAX;
