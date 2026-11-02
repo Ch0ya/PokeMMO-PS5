@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-86"
+#define LOADER_MILESTONE "loader-87"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -904,7 +904,28 @@ static void *gameThread(void *argument) {
     // heap is three times larger and the young generation is big enough to absorb a zone load.
     // The bundled runtime rejects pause-goal flags and -Xlog (loader-82's first build would not start: "Could not find
     // option 'MaxGCPauseMillis'"), so only the two sizes it already accepted are passed.
-    static const char *const options[] = {"-XX:MaxHeapSize=2048m", "-XX:MaxNewSize=512m", NULL};
+    // loader-87 (test builds only): /app0/jvm-flags holds extra arguments for the client's runtime, one per line. It is
+    // how the runtime's own option table is read (-XX:PrintFlags=) before another flag is passed to it: an unknown option
+    // stops the client before the menu, so guessing is not an option.
+    static char extra_flags[4][120];
+    const char *options[8];
+    unsigned option_count = 0;
+    options[option_count++] = "-XX:MaxHeapSize=2048m";
+    options[option_count++] = "-XX:MaxNewSize=512m";
+    FILE *flag_file = fopen("/app0/jvm-flags", "r");
+    if (flag_file) {
+        while (option_count + 1 < sizeof(options) / sizeof(options[0]) && fgets(extra_flags[option_count], sizeof(extra_flags[0]), flag_file)) {
+            char *text = extra_flags[option_count];
+            size_t length = strlen(text);
+            while (length && (text[length - 1] == '\n' || text[length - 1] == '\r' || text[length - 1] == ' ')) text[--length] = 0;
+            if (!length || text[0] == '#') continue;
+            options[option_count] = text;
+            say("client: extra runtime argument %s", text);
+            ++option_count;
+        }
+        fclose(flag_file);
+    }
+    options[option_count] = NULL;
     char client_path[400];
     snprintf(client_path, sizeof(client_path), "%s/bin/linux/x64/PokeMMO", active_dir);
     say("client: starting slot %c, revision %s", slot_state.active, active_revision);
