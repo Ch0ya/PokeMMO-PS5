@@ -158,13 +158,31 @@ uint64_t platformMonotonicNs(void) {
     return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
 }
 void platformSleepNs(uint64_t nanoseconds) {
-    uint64_t microseconds = nanoseconds / 1000u;
-    while (microseconds) {
-        unsigned step = microseconds > 1000000u ? 1000000u : (unsigned)microseconds;
-        sceKernelUsleep(step);
-        microseconds -= step;
+    if (!nanoseconds) {
+        sched_yield();
+        return;
     }
-    if (!nanoseconds) sched_yield();
+    // loader-84: sceKernelUsleep returns no earlier than the next scheduler tick, so a frame limiter's 6 ms sleep came
+    // back late and every frame drifted to ~20 ms instead of 16.7 (steady judder, worst while the world scrolls). The
+    // bulk of a sleep still goes to the kernel; the last millisecond is spun against the monotonic clock, which lands the
+    // wake-up within a few microseconds of what was asked for.
+    const uint64_t spin_ns = 1000000ull;
+    uint64_t deadline = platformMonotonicNs() + nanoseconds;
+    for (;;) {
+        uint64_t now = platformMonotonicNs();
+        if (now >= deadline) return;
+        uint64_t left = deadline - now;
+        if (left > spin_ns) {
+            uint64_t kernel_ns = left - spin_ns;
+            if (kernel_ns > 1000000000ull) kernel_ns = 1000000000ull;
+            unsigned step = (unsigned)(kernel_ns / 1000u);
+            sceKernelUsleep(step ? step : 1u);
+            continue;
+        }
+        while (platformMonotonicNs() < deadline) {
+        }
+        return;
+    }
 }
 void platformYield(void) { sched_yield(); }
 // No kernel randomness function is exported to titles outside the WebKit module (which the loader must not pull in), so the

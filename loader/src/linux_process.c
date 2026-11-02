@@ -4,7 +4,9 @@
 // Changes: process facts from the platform (pid, cores, a fixed memory size) instead of Horizon's kernel.
 #include "linux_process.h"
 #include <limits.h>
+#include <stdatomic.h>
 #include <string.h>
+#include "diagnostics.h"
 #include "platform.h"
 #include <unistd.h>
 
@@ -116,6 +118,10 @@ int linuxProcessUsleep(uint32_t microseconds) {
     return linuxProcessNanosleep(&request, NULL);
 }
 // The sleep is never interrupted, so `remaining` is never written.
+// loader-84: how late the clock says each sleep came back. The client paces its own frames with this call, so a sleep
+// that overshoots by a scheduler tick shows up as frames at 20 ms instead of 16.7; the figure is logged every 600 calls.
+static _Atomic unsigned sleep_calls, sleep_over_max_us;
+static _Atomic unsigned long long sleep_over_total_us;
 int linuxProcessNanosleep(const LinuxTimespec *request, LinuxTimespec *remaining) {
     (void)remaining;
     if (!request) return fail(LINUX_EFAULT);
@@ -128,15 +134,28 @@ int linuxProcessNanosleep(const LinuxTimespec *request, LinuxTimespec *remaining
     int error = monotonic(&start);
     if (error) return fail(error);
     if (ns > INT64_MAX - start) return fail(LINUX_EOVERFLOW);
-    int64_t deadline = start + ns, left = ns;
+    int64_t deadline = start + ns, left = ns, now = start;
     for (;;) {
         platformSleepNs((uint64_t)left);
-        int64_t now;
         int clock_error = monotonic(&now);
         if (clock_error) return fail(clock_error);
         if (now < start) return fail(LINUX_EIO);
         left = now < deadline ? deadline - now : 0;
-        if (!left) return 0;
+        if (!left) break;
         // A sleep may end early; enforce the monotonic deadline.
     }
+    if (now > deadline) {  // how late it came back: the number that says whether the client's pacing is accurate
+        unsigned over_us = (unsigned)((now - deadline) / 1000);
+        atomic_fetch_add(&sleep_over_total_us, over_us);
+        unsigned previous = atomic_load(&sleep_over_max_us);
+        while (over_us > previous && !atomic_compare_exchange_weak(&sleep_over_max_us, &previous, over_us)) {
+        }
+    }
+    unsigned calls = atomic_fetch_add(&sleep_calls, 1) + 1;
+    if (calls % 600 == 0) {
+        diagnosticsTrace("sleep.pace calls=%u overshoot_max_us=%u overshoot_total_us=%llu", calls,
+                         atomic_load(&sleep_over_max_us), atomic_load(&sleep_over_total_us));
+        atomic_store(&sleep_over_max_us, 0);
+    }
+    return 0;
 }
