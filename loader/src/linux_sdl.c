@@ -2250,6 +2250,7 @@ static bool sdlGlSwapWindow(void *window) {
     if (swap_frame % 60 == 0) checkGlErrors(swap_frame, "client");
     static uint64_t upscale_ns;
     static unsigned upscale_calls;
+    static _Atomic unsigned long long capture_ns, switch_ns, draw_ns;
     // loader-45: with a render scale above 1 the client drew its picture into a window smaller than the surface (the
     // bottom-left of the framebuffer, where GL starts). Stretch it over the whole surface first, so the loading screen's
     // content check, the pad's probes and everything the loader draws afterwards all work in the full-screen space.
@@ -2259,11 +2260,18 @@ static bool sdlGlSwapWindow(void *window) {
         clientScreenSize(&cw, &ch);
         uint64_t upscale_began = platformMonotonicNs();
         if (client_surface != EGL_NO_SURFACE) {
-            // loader-70: capture the client's surface while it is current, then draw the capture on the window.
+            // loader-72: timed in three pieces - the capture (which waits for the client's queued draws), the surface
+            // switch, and the upscale draw - because the whole present costs about 5.6 ms of the 16.7 ms frame.
+            uint64_t t0 = platformMonotonicNs();
             bool captured = overlayCaptureSurface(cw, ch);
+            uint64_t t1 = platformMonotonicNs();
+            atomic_fetch_add(&capture_ns, t1 - t0);
             if (eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context) == EGL_TRUE) {
                 client_surface_current = false;
+                uint64_t t2 = platformMonotonicNs();
+                atomic_fetch_add(&switch_ns, t2 - t1);
                 if (captured) overlayDrawCapturedSurface(w, h);
+                atomic_fetch_add(&draw_ns, platformMonotonicNs() - t2);
             }
         } else if (clientTargetOn()) {
             if (overlayCaptureFramebuffer(client_target_fbo, cw, ch)) overlayDrawCapturedSurface(w, h);  // fallback texture target
@@ -2318,6 +2326,11 @@ static bool sdlGlSwapWindow(void *window) {
                              atomic_load(&client_depth_clears), atomic_load(&client_clear_calls), atomic_load(&client_stencil_enables));
         if (upscale_calls || upscale_ns)
             diagnosticsTrace("gl.upscale.pace frame=%u calls=%u cpu_ms=%llu", frame, upscale_calls, (unsigned long long)(upscale_ns / 1000000ull));
+        if (client_surface != EGL_NO_SURFACE)
+            diagnosticsTrace("gl.present.pace frame=%u capture_ms=%llu switch_ms=%llu draw_ms=%llu", frame,
+                             (unsigned long long)(atomic_exchange(&capture_ns, 0) / 1000000ull),
+                             (unsigned long long)(atomic_exchange(&switch_ns, 0) / 1000000ull),
+                             (unsigned long long)(atomic_exchange(&draw_ns, 0) / 1000000ull));
         upscale_ns = 0;
         upscale_calls = 0;
         pace_17 = pace_25 = pace_33 = pace_50 = pace_100 = pace_max_ms = 0;
