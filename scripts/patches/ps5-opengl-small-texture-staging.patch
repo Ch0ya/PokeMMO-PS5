@@ -1,0 +1,37 @@
+--- a/src/gallium/ps5/ps5_screen.c
++++ b/src/gallium/ps5/ps5_screen.c
+@@ -1599,6 +1599,13 @@
+           util_format_get_blockheight(storage) == util_format_get_blockheight(view);
+ }
+ 
++/* Native color render targets are padded to PS5_RENDER_ALIGNMENT (2 MiB).
++ * A 512x512 RGBA8 sprite is 1 MiB, so the direct path burns a 2 MiB block for
++ * every small texture the client keeps.  The linear+staging path already
++ * handles mipmapped render/sample textures; use it whenever the direct block
++ * would waste more than half of its space. */
++#define PS5_LINEAR_STAGING_MAX_BYTES (PS5_RENDER_ALIGNMENT / 2u)
++
+ static bool
+ ps5_linear_sampled_layout(const struct pipe_resource *resource)
+ {
+@@ -1620,7 +1627,10 @@
+        !resource->last_level && resource->width0 && resource->height0 &&
+        resource->width0 <= PS5_MAX_COLOR_WIDTH && resource->height0 <= PS5_MAX_COLOR_HEIGHT &&
+        (resource->bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW)) ==
+-          (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW))
++          (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW) &&
++       (uint64_t)resource->width0 * resource->height0 *
++             util_format_get_blocksize(resource->format) >
++          PS5_LINEAR_STAGING_MAX_BYTES)
+       return false;
+    return resource && ps5_sampled_texture_format(resource->format) &&
+           resource->nr_samples <= 1 &&
+@@ -17750,6 +17760,8 @@
+ {
+    printf("[ps5-cache] clflushopt=%u cacheline=%u\n",
+           util_get_cpu_caps()->has_clflushopt, util_get_cpu_caps()->cacheline);
++   printf("[ps5-gallium] small-rt-staging max-bytes=%u alignment=%u\n",
++          PS5_LINEAR_STAGING_MAX_BYTES, PS5_RENDER_ALIGNMENT);
+    struct ps5_screen *screen = calloc(1, sizeof(*screen));
+    struct nir_shader_compiler_options *vs_options;
+    struct nir_shader_compiler_options *tcs_options;

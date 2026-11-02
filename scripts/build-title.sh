@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ch0ya
+# Assemble a native PS5 title (FSELF eboot + libc.prx shim + sce_sys) that links ps5-opengl.
+#
+# Runs inside the build environment (pokemmo-ps5-buildenv). It follows the same integration ps5-opengl's own
+# native test builder uses (heap size, malloc wraps, linker script, AGC import stubs) so we stay on the
+# path that project validated on hardware.
+#
+#   scripts/build-title.sh --title-id PPSA98001 --name "PokeMMO" --sources loader/src \
+#       [--sources DIR]... [--include DIR]... [--zlib] [--assets DIR] [--heap-mib 256] [--download-mib 256]
+#       [--content-suffix LOADER] [--define NAME=VALUE]... [--branding DIR]
+#
+# --sources DIR   every .c/.cpp in DIR is compiled (C11 / C++20, -O2) together with the ps5-opengl glue (repeatable).
+# --include DIR   headers in DIR are visible to every source (repeatable).
+# --zlib          link the zlib the boilerplate builds for the console (the loader's zlib adapters need it).
+# --branding DIR  the home screen icon (DIR/icon0.png) and background (DIR/background.dds, both pic0 and pic1) replace the
+#                 boilerplate's artwork; its sound (snd0.at9) is left out.
+# Output: build/titles/<TITLE_ID>/dist/<TITLE_ID>/ (folder title) and .zip next to it.
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+template=${PS5_NATIVE_APP_TEMPLATE:?run inside the build environment: ../pokemmo-ps5-buildenv/ps5env make loader}
+sdk=${PS5_PAYLOAD_SDK:?}
+prefix=${PS5_OPENGL_PREFIX:?}
+glsrc=${PS5_OPENGL_SOURCE:?}
+
+title_id="" name="" assets="" branding="" heap_mib=256 download_mib=256 suffix="" definitions=() sources=() includes=() zlib=0
+while (($#)); do
+    case $1 in
+        --title-id) title_id=$2; shift 2 ;;
+        --name) name=$2; shift 2 ;;
+        --sources) sources+=("$2"); shift 2 ;;
+        --include) includes+=("$2"); shift 2 ;;
+        --zlib) zlib=1; shift ;;
+        --assets) assets=$2; shift 2 ;;
+        --branding) branding=$2; shift 2 ;;
+        --heap-mib) heap_mib=$2; shift 2 ;;
+        --download-mib) download_mib=$2; shift 2 ;;
+        --content-suffix) suffix=$2; shift 2 ;;
+        --define) definitions+=("$2"); shift 2 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+# Retail PS5 titles are PPSA + 5 digits; any other 9 characters (A-Z, 0-9) is an experiment (the boilerplate's own checks
+# are relaxed to match, below), e.g. POKEMMOP5.
+[[ $title_id =~ ^[A-Z0-9]{9}$ ]] || { echo "--title-id must be 9 characters A-Z/0-9 (retail form: PPSA + 5 digits)" >&2; exit 2; }
+retail_id=0
+[[ $title_id =~ ^PPSA[0-9]{5}$ ]] && retail_id=1
+[[ -n $name && ${#sources[@]} -gt 0 ]] || { echo "--name and at least one --sources directory are required" >&2; exit 2; }
+for directory in "${sources[@]}" "${includes[@]}"; do
+    [[ -d $root/$directory ]] || { echo "missing directory: $directory" >&2; exit 2; }
+done
+[[ $heap_mib =~ ^[0-9]+$ && $download_mib =~ ^[0-9]+$ ]] || { echo "sizes must be integers" >&2; exit 2; }
+suffix=${suffix:-${title_id:4}}
+suffix=${suffix//[^A-Z0-9]/}
+[[ $suffix =~ ^[A-Z0-9]{1,16}$ ]] || { echo "--content-suffix must be 1-16 of A-Z0-9" >&2; exit 2; }
+
+(cd "$prefix" && sha256sum --check --strict --quiet manifest.sha256)
+
+app="$root/build/titles/$title_id"
+rm -rf -- "$app"
+mkdir -p "$app"
+cp "$template/Makefile" "$app/Makefile"
+for directory in runtime sce_sys tooling tools; do
+    mkdir -p "$app/$directory"
+    cp -a "$template/$directory/." "$app/$directory/"
+done
+
+# Process heap: ps5-opengl's builder sets an explicit size instead of the template's "unlimited".
+heap_source="$app/tooling/native/sce_module_writer.cpp"
+heap_default='write_u64(result.data, result.heap_size, std::numeric_limits<std::uint64_t>::max());'
+[[ $(grep -Fc "$heap_default" "$heap_source") == 1 ]] || { echo "boilerplate heap hook changed" >&2; exit 2; }
+heap_hex=$(printf '0x%xULL' $((heap_mib << 20)))
+sed -i "s/$heap_default/write_u64(result.data, result.heap_size, $heap_hex);/" "$heap_source"
+
+# ps5-opengl's app heap replaces the allocator wholesale; partial wrapping is unsafe (see its docs).
+link_script="$app/tools/build.sh"
+[[ $(grep -Fc -- '--eh-frame-hdr \' "$link_script") == 1 ]] || { echo "boilerplate link step changed" >&2; exit 2; }
+sed -i 's/--eh-frame-hdr \\/--eh-frame-hdr --wrap=malloc --wrap=calloc --wrap=realloc --wrap=free --wrap=posix_memalign --wrap=malloc_usable_size \\/' \
+    "$link_script"
+cp "$template/tooling/native/ps5-pie.ld" "$app/tooling/native/ps5-pie-base.ld"
+cp "$glsrc/native-app/ps5-pie.ld" "$app/tooling/native/ps5-pie.ld"
+cp "$glsrc/native-app/app-symbols.map" "$app/tooling/native/app-symbols.map"
+
+mkdir -p "$app/src" "$app/include" "$app/vendor"
+cp "$glsrc/native-app/runtime_shims.c" "$app/src/runtime_shims.c"
+cp "$glsrc/native-app/app_heap.c" "$app/src/app_heap.c"
+
+# Build identity for splash screens and logs: release tag, else commit (+ "-dirty" for uncommitted changes).
+# safe.directory: the checkout may belong to another user inside the container (CI, ps5env).
+build_version=$(git -c safe.directory='*' -C "$root" describe --tags --always --dirty 2>/dev/null || echo unknown)
+# The release number players see (VERSION at the top of the repository, e.g. 0.1.1-beta).
+release=$(tr -d ' \r\n' < "$root/VERSION" 2>/dev/null || echo unknown)
+# Our own loader revision (REVISION at the top of the repository): a base version and the commit its count starts
+# from, e.g. "1.0 76239f7...". Every commit after that base adds one: 1.0, 1.0.1, 1.0.2, ... Dirty work keeps the same
+# revision; the build string (POKEMMO_VERSION) still names the exact commit, and Settings > Startup details shows both.
+loader_base=$(awk 'NR == 1 { print $1 }' "$root/REVISION" 2>/dev/null || true)
+loader_from=$(awk 'NR == 1 { print $2 }' "$root/REVISION" 2>/dev/null || true)
+loader_base=${loader_base:-$release}
+loader_revision=$loader_base
+if [[ -n $loader_from ]]; then
+    loader_ahead=$(git -c safe.directory='*' -C "$root" rev-list --count "$loader_from..HEAD" 2>/dev/null || true)
+    if [[ $loader_ahead =~ ^[0-9]+$ && $loader_ahead -gt 0 ]]; then loader_revision="$loader_base.$loader_ahead"; fi
+fi
+printf '// Generated by scripts/build-title.sh. Do not edit.\n#define POKEMMO_VERSION "%s"\n#define POKEMMO_RELEASE "%s"\n#define POKEMMO_REVISION "%s"\n#define POKEMMO_TITLE_ID "%s"\n' \
+    "$build_version" "$release" "$loader_revision" "$title_id" > "$app/src/pokemmo_version.h"
+# Each source folder gets its own subfolder (file names may repeat across folders); headers of --include folders are shared.
+for directory in "${sources[@]}"; do
+    target="$app/src/$(echo "$directory" | tr '/' '_')"
+    mkdir -p "$target"
+    find "$root/$directory" -maxdepth 1 -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) -exec cp {} "$target/" \;
+    cp "$app/src/pokemmo_version.h" "$target/"
+done
+for directory in "${includes[@]}"; do
+    find "$root/$directory" -maxdepth 1 -type f \( -name '*.h' -o -name '*.hpp' \) -exec cp {} "$app/include/" \;
+done
+zlib_root="$template/.deps/native/zlib/root/usr"
+if ((zlib)); then
+    [[ -s $zlib_root/lib/libz.a && -s $zlib_root/include/zlib.h ]] || { echo "the boilerplate's console zlib is missing" >&2; exit 2; }
+    cp "$zlib_root/include/zlib.h" "$zlib_root/include/zconf.h" "$app/include/"
+fi
+for headers in EGL GL KHR; do cp -a "$prefix/include/$headers" "$app/include/"; done
+
+if [[ -n $assets ]]; then
+    [[ -d $root/$assets ]] || { echo "assets directory missing: $assets" >&2; exit 2; }
+    mkdir -p "$app/assets"
+    cp -a "$root/$assets/." "$app/assets/"
+fi
+
+if [[ -n $branding ]]; then
+    for file in icon0.png background.dds; do
+        [[ -s $root/$branding/$file ]] || { echo "branding file missing: $branding/$file" >&2; exit 2; }
+    done
+    rm -f "$app/sce_sys/"{snd0.at9,background-source.png,launch-background-source.png}
+    cp "$root/$branding/icon0.png" "$app/sce_sys/icon0.png"
+    cp "$root/$branding/background.dds" "$app/sce_sys/pic0.dds"
+    cp "$root/$branding/background.dds" "$app/sce_sys/pic1.dds"
+fi
+
+# Title metadata: ps5-opengl's param.json (address-space and page-table settings) with our identity.
+python3 - "$glsrc/native-app/param.json" "$app/sce_sys/param.json" "$title_id" "$name" "$suffix" "$download_mib" "$release" <<'PY'
+import json, re, sys
+from pathlib import Path
+source, target, title_id, name, suffix, download, release = sys.argv[1:]
+param = json.loads(Path(source).read_text())
+param["titleId"] = title_id
+param["conceptId"] = title_id[4:] if title_id[4:].isdigit() else "99999"  # a number either way
+param["contentId"] = f"UP9000-{title_id}_00-" + ("PKMMO" + suffix).ljust(16, "0")[:16]
+param["localizedParameters"]["en-US"]["titleName"] = name
+param["downloadDataSize"] = int(download)
+# contentVersion lets consoles detect updates. Map our MAJOR.MINOR.PATCH to NN.NNN.NNN, with MAJOR+1 so it stays
+# above the 01.000.000 that the early tester builds shipped (monotonic through 1.0.0 -> 02.000.000).
+m = re.match(r"(\d+)\.(\d+)\.(\d+)", release)
+if m:
+    major, minor, patch = (int(x) for x in m.groups())
+    param["contentVersion"] = f"{major + 1:02d}.{minor:03d}.{patch:03d}"
+Path(target).write_text(json.dumps(param, indent=2) + "\n")
+PY
+python3 "$glsrc/tools/native-display-metadata.py" "$app/sce_sys/param.json" --fps 120
+
+# One linker group: ps5-opengl plus the C++ runtime it needs.
+compiler_runtime=$("${PS5_CLANG:-clang-18}" --print-resource-dir)/lib/linux/libclang_rt.builtins-x86_64.a
+{
+    printf 'SEARCH_DIR("%s")\nSEARCH_DIR("%s")\n' "$sdk/target/lib" "$prefix/lib"
+    printf 'EXTERN(ps5_agc_gate2_run)\nGROUP (\n'
+    libraries=("$prefix/lib/libPS5OpenGL.a")
+    ((zlib)) && libraries+=("$zlib_root/lib/libz.a")
+    for library in "${libraries[@]}" "$sdk/target/lib/libunwind.a" "$sdk/target/lib/libc++abi.a" \
+        "$sdk/target/lib/libc++.a" "$compiler_runtime"; do
+        [[ -s $library ]] || { echo "missing library: $library" >&2; exit 2; }
+        printf '  "%s"\n' "$library"
+    done
+    printf ')\n'
+} > "$app/vendor/libps5_opengl_group.a"
+{
+    printf 'APP_INCLUDE_PATHS = include\nAPP_STATIC_ARCHIVES = vendor/libps5_opengl_group.a\n'
+    printf 'APP_DEFINITIONS = GL_GLEXT_PROTOTYPES=1 %s\n' "${definitions[*]:-}"
+} > "$app/.env"
+
+# A private copy of the SDK: the AGC import stubs are written into it.
+mkdir -p "$app/.deps"
+cp -a "$template/.deps/native" "$app/.deps/native"
+app_sdk="$app/.deps/native/ps5-payload-sdk"
+mkdir -p "$app/build/native-imports"
+# Discover the SDK's compiler and linker instead of naming them: their names are the toolchain's, not ours.
+clang_wrapper=$(find "$app/tooling" -maxdepth 1 -type f -name '*clang*' | head -1)
+sdk_lld=$(find "$app_sdk/bin" -maxdepth 1 -name '*lld' | head -1)
+[[ -n $clang_wrapper && -n $sdk_lld ]] || { echo "the SDK compiler/linker is missing under $app" >&2; exit 2; }
+for stub in agc_link_stub:libSceAgc agc_driver_link_stub:libSceAgcDriver; do
+    source=${stub%%:*} library=${stub##*:}
+    PS5_PAYLOAD_SDK="$app_sdk" sh "$clang_wrapper" -std=c11 -O2 -fPIC -ffunction-sections -fdata-sections \
+        -c "$glsrc/native-app/$source.c" -o "$app/build/native-imports/$source.o"
+    "$sdk_lld" --shared -soname "$library.prx" -o "$app_sdk/target/lib/$library.so" \
+        "$app/build/native-imports/$source.o"
+done
+
+if ((!retail_id)); then  # the boilerplate only knows PPSA ids: let it pass this one
+    sed -i 's/r"PPSA\\d{5}"/r"[A-Z0-9]{9}"/; s/-PPSA\\d{5}_00-/-[A-Z0-9]{9}_00-/' "$app/tools/build.sh"
+    grep -q '\[A-Z0-9\]{9}_00' "$app/tools/build.sh" || { echo "could not relax the boilerplate's title id check" >&2; exit 2; }
+fi
+make -C "$app" --no-print-directory app
+
+dist="$app/dist/$title_id"
+for required in eboot.bin sce_module/libc.prx sce_sys/param.json; do
+    [[ -s $dist/$required ]] || { echo "missing output: $required" >&2; exit 1; }
+done
+printf '\nTitle folder: %s\nZip:          %s\n' "${dist#"$root"/}" "${dist#"$root"/}.zip"

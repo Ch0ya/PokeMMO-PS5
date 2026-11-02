@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy: what PokeMMO accesses</title>
+<meta name="description" content="What the PokeMMO PS5 title accesses, where it keeps its data, and what it does with it.">
+<link rel="icon" href="favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <a href="index.html"><img src="icon.png" alt="PokeMMO icon"></a>
+    <div>
+      <h1>Privacy</h1>
+      <p class="tagline">What PokeMMO accesses, and what it does with it. Last updated 27 October 2026.</p>
+    </div>
+  </header>
+
+  <div class="panel">
+    <p><strong>In short:</strong> the title has no servers of its own and collects nothing. Everything it keeps stays on your
+    PS5. It talks to PokeMMO's servers only to download/update the client and to play the game.</p>
+  </div>
+
+  <h2>What the title stores</h2>
+  <table>
+    <tr><th>Where</th><th>What</th><th>Why</th></tr>
+    <tr><td>The title's storage on the console</td><td>The downloaded PokeMMO client, its caches, each PS5 profile's PokeMMO
+        settings (including PokeMMO's remembered login if you chose "remember me"), the start-up log and the graphics
+        driver log</td>
+        <td>So the game starts without downloading again, keeps your settings, and can show what happened in Settings &gt; Log</td></tr>
+    <tr><td>The title itself (read-only)</td><td>The game ROMs supplied when the title was built, under
+        <code>assets/roms</code></td>
+        <td>So the client has its game files from the first start</td></tr>
+  </table>
+  <p>Nothing here is sent to the project or its developers.</p>
+
+  <h2>Diagnostic log</h2>
+  <p>The loader writes a start-up log to its own storage and shows it in <strong>Settings &gt; Log</strong>; the previous
+  start's log and the graphics driver's log (which also receives the client's console output) are shown there too. The
+  loader also broadcasts the same lines on the local network over UDP port 18194, which is useful when developing;
+  a build can additionally name one PC to send them to. The logs are not uploaded to any
+  server. They can contain the console's local IP address, the PokeMMO revision and file paths on the console.</p>
+
+  <h2>Everything else the title connects to</h2>
+  <table>
+    <tr><th>Where</th><th>Why</th></tr>
+    <tr><td>PokeMMO's download server</td><td>To download and update the official PokeMMO client</td></tr>
+    <tr><td>PokeMMO's game servers</td><td>The game itself: your account and play are between you and PokeMMO, under their terms</td></tr>
+    <tr><td>GitHub's release API</td><td>To check whether a newer PokeMMO release exists (it only reads the version tag)</td></tr>
+  </table>
+  <p>There is no analytics, advertising or tracking of any kind.</p>
+
+  <h2>Removing your data</h2>
+  <ul>
+    <li>Delete the title on the PS5 to remove everything it keeps there.</li>
+    <li>The ROMs are part of the installed title, so deleting the title removes them too.</li>
+    <li>Your PokeMMO account and characters stay on PokeMMO's servers; deleting the title does not delete them.</li>
+  </ul>
+
+  <h2>Questions</h2>
+  <p>Open an issue at <a href="https://github.com/Ch0ya/PokeMMO-PS5/issues">github.com/Ch0ya/PokeMMO-PS5/issues</a>.
+  The title's source code is public, so everything on this page can be checked there.</p>
+
+  <footer>
+    <p><a href="index.html">PokeMMO</a> · Not affiliated with PokeMMO, Nintendo, The Pokémon Company or Sony.</p>
+  </footer>
+</main>
+</body>
+</html>
