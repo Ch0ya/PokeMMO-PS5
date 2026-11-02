@@ -2100,6 +2100,8 @@ static void padUiShortcuts(LinuxInputSnapshot *snapshot, unsigned width, unsigne
 // (three probes, one every 15 frames each, never two in the same frame) and all of them stand aside while the left stick
 // is deflected.  The world scrolls exactly when that stick is held, and a probe's wait landing on that frame was a hitch
 // the player could see; the screens being probed cannot change shape mid-step.  The cost is logged as sdl.probe.pace.
+// loader-82: the read itself no longer waits at all - the block is queued into a pixel-pack buffer and collected on a
+// later frame (overlayReadBackQueue/overlayReadBackFetch), so a probe no longer costs a frame while the scene is busy.
 #define PAD_PROBE_EVERY 15u
 #define PAD_PROBE_STICK 8000
 static _Atomic bool pad_stick_moving;  // the left stick is deflected: the player is walking, so the probes wait
@@ -2108,15 +2110,20 @@ static bool probeDue(unsigned frame, unsigned offset) { return frame % PAD_PROBE
 #define PAD_PROBE_DARK 110u
 static void padProbeBKeycap(unsigned width, unsigned height, unsigned frame) {
     static uint8_t pixels[256 * 256 * 4];
+    static OverlayReadBack slot;
     static unsigned agree;
-    if (width == 0 || height == 0 || !probeDue(frame, 0) || atomic_load(&pad_stick_moving)) return;
-    float kx = padScaleX(width), ky = padScaleY(height), scale = padBattleScale(height);
-    float bx = padBattleBX(width, height), by = padBattleBY(height), half = 10.0f * scale;
+    if (width == 0 || height == 0) return;
     unsigned block_w = 0, block_h = 0;
-    if (!overlayReadBack(width, height, (bx - half) * kx, (by - half) * ky, 2.0f * half * kx, 2.0f * half * ky, pixels,
-                         sizeof(pixels), &block_w, &block_h) ||
-        block_w < 8 || block_h < 8)
-        return;
+    bool fresh = overlayReadBackFetch(&slot, pixels, sizeof(pixels), &block_w, &block_h);
+    if (!fresh && probeDue(frame, 0) && !atomic_load(&pad_stick_moving)) {
+        float kx = padScaleX(width), ky = padScaleY(height), scale = padBattleScale(height);
+        float bx = padBattleBX(width, height), by = padBattleBY(height), half = 10.0f * scale;
+        if (!overlayReadBackQueue(&slot, width, height, (bx - half) * kx, (by - half) * ky, 2.0f * half * kx,
+                                  2.0f * half * ky, sizeof(pixels), frame))
+            fresh = overlayReadBack(width, height, (bx - half) * kx, (by - half) * ky, 2.0f * half * kx,
+                                    2.0f * half * ky, pixels, sizeof(pixels), &block_w, &block_h);
+    }
+    if (!fresh || block_w < 8 || block_h < 8) return;
     static const float ring[4][2] = {{0.225f, 0.5f}, {0.775f, 0.5f}, {0.5f, 0.225f}, {0.5f, 0.775f}};
     unsigned bright = 0;
     for (unsigned i = 0; i < 4; ++i) {
@@ -2148,19 +2155,24 @@ static void padProbeBKeycap(unsigned width, unsigned height, unsigned frame) {
 #define PAD_HOTBAR_BAND_W ((float)(PAD_HOTBAR_BAND_CELLS * LINUX_SDL_HOTBAR_PITCH))
 static void padProbeHotbar(unsigned width, unsigned height, unsigned frame) {
     static uint8_t pixels[2048 * 128 * 4];
+    static OverlayReadBack slot;
     static unsigned agree;
-    if (width == 0 || height == 0 || !probeDue(frame, 5) || atomic_load(&pad_stick_moving)) return;
-    // The band sits just under the cells' top edge, clear of the slot number and of an item's icon. It covers four slots
-    // after the first: a majority of points is enough, and a shorter band keeps the read-back small at a large size.
-    float kx = padScaleX(width), ky = padScaleY(height);
-    float cell_x = padHotbarFrameX(width) + LINUX_SDL_HOTBAR_INSET_X;
-    float cell_y = padHotbarFrameY(height) + LINUX_SDL_HOTBAR_INSET_Y;
-    float left = (cell_x + LINUX_SDL_HOTBAR_PITCH + 6.0f) * kx;
-    float top = (cell_y + 4.0f) * ky;
+    if (width == 0 || height == 0) return;
     unsigned block_w = 0, block_h = 0;
-    if (!overlayReadBack(width, height, left, top, PAD_HOTBAR_BAND_W * kx, 8.0f * ky, pixels, sizeof(pixels), &block_w, &block_h) ||
-        block_w < 8 || block_h < 3)
-        return;
+    bool fresh = overlayReadBackFetch(&slot, pixels, sizeof(pixels), &block_w, &block_h);
+    if (!fresh && probeDue(frame, 5) && !atomic_load(&pad_stick_moving)) {
+        // The band sits just under the cells' top edge, clear of the slot number and of an item's icon. It covers four slots
+        // after the first: a majority of points is enough, and a shorter band keeps the read-back small at a large size.
+        float kx = padScaleX(width), ky = padScaleY(height);
+        float cell_x = padHotbarFrameX(width) + LINUX_SDL_HOTBAR_INSET_X;
+        float cell_y = padHotbarFrameY(height) + LINUX_SDL_HOTBAR_INSET_Y;
+        float left = (cell_x + LINUX_SDL_HOTBAR_PITCH + 6.0f) * kx;
+        float top = (cell_y + 4.0f) * ky;
+        if (!overlayReadBackQueue(&slot, width, height, left, top, PAD_HOTBAR_BAND_W * kx, 8.0f * ky, sizeof(pixels), frame))
+            fresh = overlayReadBack(width, height, left, top, PAD_HOTBAR_BAND_W * kx, 8.0f * ky, pixels, sizeof(pixels),
+                                    &block_w, &block_h);
+    }
+    if (!fresh || block_w < 8 || block_h < 3) return;
     unsigned grey = 0, samples = 0;
     for (unsigned cell = 0; cell < PAD_HOTBAR_BAND_CELLS; ++cell) {
         float fx = ((float)LINUX_SDL_HOTBAR_PITCH * ((float)cell + 0.15f)) / PAD_HOTBAR_BAND_W;
@@ -2190,8 +2202,11 @@ static void padProbeHotbar(unsigned width, unsigned height, unsigned frame) {
 // Accuracy by itself (the move summary), with no L3 and no click.  The pad moves the client's own selection (its
 // direction buttons, below), so the pointer just follows whatever the client marks.
 static void padProbeMoveSelection(unsigned width, unsigned height, unsigned frame) {
-    static uint8_t pixels[4096 * 32 * 4];
-    if (width == 0 || height == 0 || !probeDue(frame, 10) || atomic_load(&pad_stick_moving)) return;
+    static struct {
+        uint8_t pixels[4096 * 32 * 4];
+        OverlayReadBack slot;
+    } rows[2];
+    if (width == 0 || height == 0) return;
     if (!pad_battle_visible) {  // the battle move summary only exists while the battle scene is up
         padMoveHover(false, 0, 0);
         return;
@@ -2199,13 +2214,24 @@ static void padProbeMoveSelection(unsigned width, unsigned height, unsigned fram
     float kx = padScaleX(width), ky = padScaleY(height), scale = padBattleScale(height);
     float left = padViewportWidth(width) / 2.0f - 670.5f * scale;
     float band_w = 429.0f * scale, band_h = 5.0f * scale;
+    bool due = probeDue(frame, 10) && !atomic_load(&pad_stick_moving);
     int found_row = -1, found_column = -1;
-    for (unsigned row = 0; row < 2 && found_row < 0; ++row) {
-        float top = padMoveRowTop(height, row) - 2.0f * scale;
+    unsigned settled = 0;
+    for (unsigned row = 0; row < 2; ++row) {
         unsigned block_w = 0, block_h = 0;
-        if (!overlayReadBack(width, height, left * kx, top * ky, band_w * kx, band_h * ky, pixels, sizeof(pixels), &block_w, &block_h) ||
-            block_w < 8 || block_h < 2)
-            continue;
+        bool ready = overlayReadBackFetch(&rows[row].slot, rows[row].pixels, sizeof(rows[row].pixels), &block_w, &block_h);
+        if (!ready && due) {
+            float top = padMoveRowTop(height, row) - 2.0f * scale;
+            if (overlayReadBackQueue(&rows[row].slot, width, height, left * kx, top * ky, band_w * kx, band_h * ky,
+                                     sizeof(rows[row].pixels), frame))
+                continue;  // queued: it is collected on a later frame, and neither row is acted on until both are in
+            ready = overlayReadBack(width, height, left * kx, top * ky, band_w * kx, band_h * ky, rows[row].pixels,
+                                    sizeof(rows[row].pixels), &block_w, &block_h);
+        }
+        if (!ready) continue;
+        ++settled;
+        if (block_w < 8 || block_h < 2) continue;
+        const uint8_t *pixels = rows[row].pixels;
         unsigned left_yellow = 0, right_yellow = 0;
         for (unsigned y = 0; y < block_h; ++y) {
             const uint8_t *p = pixels + (size_t)y * block_w * 4u;
@@ -2219,11 +2245,12 @@ static void padProbeMoveSelection(unsigned width, unsigned height, unsigned fram
             }
         }
         unsigned need = 2u + (unsigned)((float)block_w * 0.02f);
-        if (left_yellow + right_yellow >= need) {
+        if (found_row < 0 && left_yellow + right_yellow >= need) {
             found_row = (int)row;
             found_column = left_yellow >= right_yellow ? 0 : 1;
         }
     }
+    if (settled < 2) return;  // one row's block is still being copied: leave the pointer where it is
     if (found_row >= 0)
         padMoveHover(true, padMoveCellX(width, height, (unsigned)found_column), padMoveCellY(height, (unsigned)found_row));
     else

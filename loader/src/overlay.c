@@ -17,6 +17,7 @@
 #include "overlay_assets.h"
 #include "platform.h"
 #include <EGL/egl.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
@@ -63,6 +64,11 @@ enum {
     GL_UNPACK_ALIGNMENT = 0x0CF5,
     GL_PACK_ALIGNMENT = 0x0D05,
     GL_PACK_ROW_LENGTH = 0x0D02,
+    GL_STREAM_READ = 0x88E1,
+    GL_SYNC_GPU_COMMANDS_COMPLETE = 0x9117,
+    GL_SYNC_FLUSH_COMMANDS_BIT = 0x00000001,
+    GL_ALREADY_SIGNALED = 0x911A,
+    GL_CONDITION_SATISFIED = 0x911C,
     GL_DEPTH_TEST = 0x0B71,
     GL_CULL_FACE = 0x0B44,
     GL_SCISSOR_TEST = 0x0C11,
@@ -123,9 +129,18 @@ static struct {
     void (*DisableVertexAttribArray)(GLuint);
     void (*VertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *);
     void (*DrawArrays)(GLenum, GLint, GLsizei);
+    // loader-82: the asynchronous read-back's own entry points; optional (see loadAsyncFunctions).
+    void (*GenBuffers)(GLsizei, GLuint *);
+    void (*DeleteBuffers)(GLsizei, const GLuint *);
+    void (*BufferData)(GLenum, ptrdiff_t, const void *, GLenum);
+    void (*GetBufferSubData)(GLenum, ptrdiff_t, ptrdiff_t, void *);
+    void *(*FenceSync)(GLenum, GLbitfield);
+    GLenum (*ClientWaitSync)(void *, GLbitfield, uint64_t);
+    void (*DeleteSync)(void *);
 } gl;
 
 static int gl_state;  // 0 not tried, 1 ready, -1 unusable
+static unsigned readback_generation = 1;  // loader-82: bumped when a context goes away; read-back slots start over
 static EGLContext objects_context;
 static GLuint program, font_texture, logo_texture, upscale_texture;
 static GLint uniform_texture, uniform_view;
@@ -164,6 +179,26 @@ static bool loadGl(void) {
     LOAD(AttachShader) LOAD(BindAttribLocation) LOAD(LinkProgram) LOAD(GetProgramiv) LOAD(GetUniformLocation) LOAD(UseProgram) LOAD(Uniform1i)
     LOAD(Uniform2f) LOAD(EnableVertexAttribArray) LOAD(DisableVertexAttribArray) LOAD(VertexAttribPointer) LOAD(DrawArrays)
 #undef LOAD
+    return true;
+}
+
+// loader-82: the asynchronous read-back needs pixel-pack buffers and fences. They are optional: without them the probes
+// keep using the waiting read-back, and nothing else changes.
+static int async_state;  // 0 not tried, 1 usable, -1 not
+static bool loadAsyncFunctions(void) {
+    if (async_state) return async_state > 0;
+    async_state = -1;
+#define LOAD_OPTIONAL(field)                                                      \
+    if (!loadFunction(&gl.field, "gl" #field)) return false;
+    LOAD_OPTIONAL(GenBuffers)
+    LOAD_OPTIONAL(DeleteBuffers)
+    LOAD_OPTIONAL(BufferData)
+    LOAD_OPTIONAL(GetBufferSubData)
+    LOAD_OPTIONAL(FenceSync)
+    LOAD_OPTIONAL(ClientWaitSync)
+    LOAD_OPTIONAL(DeleteSync)
+#undef LOAD_OPTIONAL
+    async_state = 1;
     return true;
 }
 
@@ -248,7 +283,10 @@ static bool makeObjects(void) {
     return true;
 }
 
-void overlayContextLost(void) { objects_context = EGL_NO_CONTEXT; }
+void overlayContextLost(void) {
+    objects_context = EGL_NO_CONTEXT;
+    ++readback_generation;  // loader-82: the read-back slots' buffers and fences belong to the old context too
+}
 
 bool overlayBegin(unsigned width, unsigned height) {
     if (!gl_state) gl_state = loadGl() && inflateAssets() ? 1 : -1;
@@ -535,6 +573,104 @@ bool overlayReadBack(unsigned width, unsigned height, float x, float y, float w,
     }
     if (out_width) *out_width = (unsigned)block_width;
     if (out_height) *out_height = (unsigned)block_height;
+    return true;
+}
+
+// loader-82: the asynchronous read-back. The block geometry is the one overlayReadBack computes (same coordinates, same
+// bounds), so a caller can swap one for the other.
+static bool readBackRegion(unsigned width, unsigned height, float x, float y, float w, float h, unsigned capacity,
+                           GLint *left, GLint *bottom, GLsizei *block_width, GLsizei *block_height) {
+    *block_width = (GLsizei)(w * (float)width / OVERLAY_WIDTH + 0.5f);
+    *block_height = (GLsizei)(h * (float)height / OVERLAY_HEIGHT + 0.5f);
+    if (*block_width < 1) *block_width = 1;
+    if (*block_height < 1) *block_height = 1;
+    if ((size_t)*block_width * (size_t)*block_height * 4u > capacity) return false;
+    *left = (GLint)(x * (float)width / OVERLAY_WIDTH + 0.5f);
+    GLint top = (GLint)(y * (float)height / OVERLAY_HEIGHT + 0.5f);
+    if (*left < 0) *left = 0;
+    if (top < 0) top = 0;
+    if (*left + *block_width > (GLint)width) *left = (GLint)width - *block_width;
+    if (top + *block_height > (GLint)height) top = (GLint)height - *block_height;
+    *bottom = (GLint)height - top - *block_height;
+    if (*bottom < 0) *bottom = 0;
+    return true;
+}
+
+// The block is copied by the driver into this slot's own pixel-pack buffer, and the CPU reads it only once the fence says
+// the copy is done: nothing here waits for the frame the game is drawing, which is what the probes used to cost.
+bool overlayReadBackQueue(OverlayReadBack *slot, unsigned width, unsigned height, float x, float y, float w, float h,
+                          unsigned capacity, unsigned frame) {
+    if (!slot || gl_state <= 0 || eglGetCurrentContext() == EGL_NO_CONTEXT || !loadAsyncFunctions()) return false;
+    if (slot->generation != readback_generation) {  // made in a context that is gone: its buffer and fence went with it
+        slot->buffer = 0;
+        slot->fence = NULL;
+        slot->generation = readback_generation;
+    }
+    if (slot->fence) return false;  // the previous block is still being copied: let the caller collect it first
+    GLint left = 0, bottom = 0;
+    GLsizei block_width = 0, block_height = 0;
+    if (!readBackRegion(width, height, x, y, w, h, capacity, &left, &bottom, &block_width, &block_height)) return false;
+    unsigned bytes = (unsigned)((size_t)block_width * (size_t)block_height * 4u);
+    if (!slot->buffer) {
+        gl.GenBuffers(1, &slot->buffer);
+        if (!slot->buffer) return false;
+    }
+    GLint pack_buffer = 0, framebuffer = 0;
+    gl.GetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+    gl.GetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+    gl.PushClientAttrib(GL_CLIENT_ALL_ATTRIB_BITS);
+    gl.BindBuffer(GL_PIXEL_PACK_BUFFER, slot->buffer);
+    if (bytes != slot->bytes) {
+        gl.BufferData(GL_PIXEL_PACK_BUFFER, (ptrdiff_t)bytes, NULL, GL_STREAM_READ);
+        slot->bytes = bytes;
+    }
+    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.PixelStorei(GL_PACK_ALIGNMENT, 4);
+    gl.PixelStorei(GL_PACK_ROW_LENGTH, 0);
+    gl.ReadPixels(left, bottom, block_width, block_height, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    gl.PopClientAttrib();
+    gl.BindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)pack_buffer);
+    gl.BindFramebuffer(GL_FRAMEBUFFER, (GLuint)framebuffer);
+    slot->fence = gl.FenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    slot->frame = frame;
+    slot->block_width = (unsigned)block_width;
+    slot->block_height = (unsigned)block_height;
+    return slot->fence != NULL;
+}
+
+bool overlayReadBackFetch(OverlayReadBack *slot, uint8_t *pixels, unsigned capacity, unsigned *out_width,
+                          unsigned *out_height) {
+    if (out_width) *out_width = 0;
+    if (out_height) *out_height = 0;
+    if (!slot || !slot->fence || !pixels || slot->generation != readback_generation) return false;
+    unsigned bytes = slot->block_width * slot->block_height * 4u;
+    if (bytes > capacity) return false;
+    // One millisecond is the most this may ever wait: the copy was queued a slot earlier, so it is normally finished.
+    GLenum waited = gl.ClientWaitSync(slot->fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000ull);
+    if (waited != GL_ALREADY_SIGNALED && waited != GL_CONDITION_SATISFIED) return false;  // collect it next time
+    gl.DeleteSync(slot->fence);
+    slot->fence = NULL;
+    GLint pack_buffer = 0;
+    gl.GetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+    gl.BindBuffer(GL_PIXEL_PACK_BUFFER, slot->buffer);
+    uint64_t began = platformMonotonicNs();
+    gl.GetBufferSubData(GL_PIXEL_PACK_BUFFER, 0, (ptrdiff_t)bytes, pixels);
+    uint64_t read_ns = platformMonotonicNs() - began;
+    gl.BindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)pack_buffer);
+    ++readback_calls;
+    readback_ns += read_ns;
+    if (read_ns / 1000000ull > readback_max_ms) readback_max_ms = (unsigned)(read_ns / 1000000ull);
+    for (unsigned row = 0; row < slot->block_height / 2; ++row) {  // bottom row first, as glReadPixels gives them
+        uint8_t *a = pixels + (size_t)row * slot->block_width * 4u;
+        uint8_t *b = pixels + (size_t)(slot->block_height - 1 - row) * slot->block_width * 4u;
+        for (unsigned i = 0; i < slot->block_width * 4u; ++i) {
+            uint8_t swap = a[i];
+            a[i] = b[i];
+            b[i] = swap;
+        }
+    }
+    if (out_width) *out_width = slot->block_width;
+    if (out_height) *out_height = slot->block_height;
     return true;
 }
 

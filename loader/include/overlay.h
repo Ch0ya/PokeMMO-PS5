@@ -34,6 +34,23 @@ bool overlayReadBack(unsigned width, unsigned height, float x, float y, float w,
 // Totals for the read-backs since the last call, then the counters start again: `ns` is their whole time, `max_ms` the
 // slowest one.
 void overlayReadBackStats(unsigned *calls, unsigned long long *ns, unsigned *max_ms);
+// loader-82: the same block read, split in two so the caller never waits for the frame the game is drawing. The driver
+// copies the block into this slot's own pixel-pack buffer while it works; the CPU collects it on a later call, when the
+// copy has finished. `overlayReadBackQueue` starts it (false while the previous block is still in flight, or when the
+// block does not fit `capacity`), `overlayReadBackFetch` collects it (true when `pixels` holds a fresh block, first row
+// at the top, with the same geometry as `overlayReadBack`). Both fall back to no work when the driver has no pixel-pack
+// buffers, so a caller can keep `overlayReadBack` as its fallback.
+typedef struct {
+    unsigned buffer;    // the slot's own pixel-pack buffer (0: not made yet)
+    void *fence;        // the fence of the copy in flight (NULL: nothing in flight)
+    unsigned frame;     // the frame the copy was queued on
+    unsigned generation; // the overlay context generation the objects belong to
+    unsigned bytes, block_width, block_height;
+} OverlayReadBack;
+bool overlayReadBackQueue(OverlayReadBack *slot, unsigned width, unsigned height, float x, float y, float w, float h,
+                          unsigned capacity, unsigned frame);
+bool overlayReadBackFetch(OverlayReadBack *slot, uint8_t *pixels, unsigned capacity, unsigned *out_width,
+                          unsigned *out_height);
 // Text cut to fit `max_width`, with "..." where it was cut.
 void overlayTextFit(float x, float y, const char *text, float size, float max_width, uint32_t rgba);
 // loader-45: the client's picture when the loader upscales it (a render scale above 1). The window the client was given

@@ -16,8 +16,8 @@
 int main(int argc, char **argv) {
     const char *client = NULL, *root = NULL;
     unsigned timeout = 120;
-    const char *options[16] = {"-XX:MaxHeapSize=640m", "-XX:MaxNewSize=128m", NULL};
-    unsigned option_count = 2;
+    const char *options[16] = {"-XX:MaxHeapSize=2048m", "-XX:MaxNewSize=512m", "-XX:MaxGCPauseMillis=10", NULL};
+    unsigned option_count = 3;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--client") && i + 1 < argc)
             client = argv[++i];
