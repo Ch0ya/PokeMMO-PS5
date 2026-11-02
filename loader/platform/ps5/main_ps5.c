@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-78"
+#define LOADER_MILESTONE "loader-79"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -1487,13 +1487,8 @@ int main(void) {
     say("PokeMMO v%s, %s (Rev v%s, build %s, %s) starting; UDP log port 18194", POKEMMO_RELEASE, LOADER_MILESTONE, POKEMMO_REVISION, POKEMMO_VERSION, POKEMMO_TITLE_ID);
     guardInstall();
     signal(SIGPIPE, SIG_IGN);  // a write to a closed socket or pipe must fail with EPIPE, not end the title
-    // loader-78: ps5-opengl can cache its compiled shaders on disk, but only when PS5_SHADER_CACHE_DIR names a writable
-    // directory. Without it every new shader variant is compiled while the game is running - 64 of them in one session -
-    // and each compile is a visible hitch, which is why the stutter grows around players with new models. The directory
-    // lives in the title's writable storage, so it survives restarts.
-    mkdir("/download0/shader-cache", 0755);
-    setenv("PS5_SHADER_CACHE_DIR", "/download0/shader-cache", 1);
-    say("shaders: cache in /download0/shader-cache");
+    // loader-78 tried the driver's on-disk shader cache here; it crashed the title with a signal 11 before the menu drew
+    // (FATAL signal 11, address=0), so it is off again until it can be isolated.
     bool screen = screenOpen();
     say("screen: %s %dx%d", screen ? "ready" : "unavailable", width, height);
     chooseStorage();
