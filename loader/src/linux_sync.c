@@ -172,6 +172,10 @@ int linuxPthreadCondWait(LinuxCondition *condition, LinuxMutex *mutex) {
     if (!native || !lock) return LINUX_EINVAL;
     return linuxSyncErrno(pthread_cond_wait(native, lock));
 }
+// loader-85: a Java Thread.sleep is a native condition-variable timed wait, so this is what the client's frame limiter
+// actually waits on. The kernel returns from a timed wait on its own tick, so the wait can come back late: that is the
+// difference between a frame at 16.7 ms and one at 20 ms. Count the timeouts and the worst overshoot per 600 timeouts.
+static _Atomic unsigned cond_timeouts, cond_over_max_us, cond_over_1ms;
 int linuxPthreadCondTimedWait(LinuxCondition *condition, LinuxMutex *mutex, const LinuxTimespec *deadline) {
     pthread_cond_t *native = condition ? nativeCond(condition) : NULL;
     pthread_mutex_t *lock = mutex ? nativeMutex(mutex) : NULL;
@@ -179,7 +183,30 @@ int linuxPthreadCondTimedWait(LinuxCondition *condition, LinuxMutex *mutex, cons
     if (deadline->nanoseconds < 0 || deadline->nanoseconds >= 1000000000) return LINUX_EINVAL;
     // The deadline is on the condition's clock; the native condition uses the matching native clock.
     struct timespec until = {(time_t)deadline->seconds, (long)deadline->nanoseconds};
-    return linuxSyncErrno(pthread_cond_timedwait(native, lock, &until));
+    int clock = LINUX_CLOCK_REALTIME;
+    memcpy(&clock, (const unsigned char *)condition + 8, sizeof(clock));
+    int result = linuxSyncErrno(pthread_cond_timedwait(native, lock, &until));
+    if (result == LINUX_ETIMEDOUT) {
+        struct timespec now;
+        if (clock_gettime((clock_t)clock, &now) == 0) {
+            int64_t over_ns = ((int64_t)now.tv_sec - deadline->seconds) * 1000000000 + ((int64_t)now.tv_nsec - deadline->nanoseconds);
+            if (over_ns > 0) {
+                unsigned over_us = (unsigned)(over_ns / 1000);
+                if (over_us > 1000) atomic_fetch_add(&cond_over_1ms, 1);
+                unsigned previous = atomic_load(&cond_over_max_us);
+                while (over_us > previous && !atomic_compare_exchange_weak(&cond_over_max_us, &previous, over_us)) {
+                }
+            }
+        }
+        unsigned calls = atomic_fetch_add(&cond_timeouts, 1) + 1;
+        if (calls % 600 == 0) {
+            diagnosticsTrace("sleep.cond timeouts=%u over_1ms=%u max_over_us=%u", calls, atomic_load(&cond_over_1ms),
+                             atomic_load(&cond_over_max_us));
+            atomic_store(&cond_over_max_us, 0);
+            atomic_store(&cond_over_1ms, 0);
+        }
+    }
+    return result;
 }
 int linuxPthreadCondSignal(LinuxCondition *condition) {
     pthread_cond_t *native = condition ? nativeCond(condition) : NULL;

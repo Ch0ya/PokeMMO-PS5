@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-84"
+#define LOADER_MILESTONE "loader-85"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -948,18 +948,23 @@ static bool screenOpen(void) {
     // TV) and fall back to the title's 1080p if it cannot be set up. applyUiScale then sizes the client for the surface.
     typedef EGLBoolean (*SetDisplayModePS5)(EGLDisplay, EGLint, EGLint);
     SetDisplayModePS5 set_mode = (SetDisplayModePS5)eglGetProcAddress("eglSetDisplayModePS5");
-    static const EGLint modes[][2] = {{3840, 2160}, {2560, 1440}};
+    static const EGLint modes[][2] = {{3840, 2160}, {2560, 1440}, {1920, 1080}};
     // loader-74: a 1440p output is the cheapest way to give the frame budget back: the client and the upscale both
     // shrink, and the console/TV scales 1440p to the panel. /app0/output-1440 selects it before the display comes up.
+    // loader-85: /app0/client-1080 goes one step further, to test whether the frame time is fill (the same interface
+    // size, forty percent fewer pixels for the client to draw) before anything is decided from it.
     EGLint preferred = 0;
     {
         char flag[8];
-        if (readSmall("/app0/output-1440", flag, sizeof(flag))) preferred = 1;
+        if (readSmall("/app0/client-1080", flag, sizeof(flag)))
+            preferred = 2;
+        else if (readSmall("/app0/output-1440", flag, sizeof(flag)))
+            preferred = 1;
     }
     bool native_mode = false;
     if (set_mode) {
         for (size_t turn = 0; turn < sizeof(modes) / sizeof(modes[0]) && !native_mode; ++turn) {
-            size_t i = preferred ? (sizeof(modes) / sizeof(modes[0])) - 1u - turn : turn;
+            size_t i = ((size_t)preferred + turn) % (sizeof(modes) / sizeof(modes[0]));
             native_mode = set_mode(display, modes[i][0], modes[i][1]);
             if (native_mode) say("screen: native display mode %dx%d", (int)modes[i][0], (int)modes[i][1]);
         }

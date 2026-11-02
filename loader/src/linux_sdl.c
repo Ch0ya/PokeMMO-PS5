@@ -1673,6 +1673,11 @@ static bool chooseGlConfig(EGLDisplay display, bool extras, EGLConfig *config, E
 static uint64_t last_swap_ns, slowest_swap_ns;
 static unsigned frame_stalls, slow_frames;
 static unsigned pace_17, pace_25, pace_33, pace_50, pace_100, pace_max_ms;
+// loader-85: how the intervals are actually spread. The threshold counts say "late" but not "steadily late" (every frame
+// at 20 ms, which is a cadence the client's limiter chose) or "bimodal" (16.7 and 33.3, which is missed frames), and the
+// two need opposite fixes, so a 1 ms histogram of the window is logged with the counts.
+#define FRAME_HIST_BUCKETS 51u
+static unsigned frame_hist[FRAME_HIST_BUCKETS];
 static void noteFrameTime(uint64_t interval_ns, uint64_t present_ns, unsigned frame) {
     if (interval_ns > slowest_swap_ns) slowest_swap_ns = interval_ns;
     if (frame > 2 && interval_ns) {
@@ -1683,6 +1688,7 @@ static void noteFrameTime(uint64_t interval_ns, uint64_t present_ns, unsigned fr
         if (ms > 33) ++pace_33;
         if (ms > 50) ++pace_50;
         if (ms > 100) ++pace_100;
+        ++frame_hist[ms < FRAME_HIST_BUCKETS ? ms : FRAME_HIST_BUCKETS - 1u];
     }
     // Judder without a half-second stall: log the frame numbers so a hitch can be lined up with what the client was doing.
     if (frame > 2 && interval_ns > 40000000ull && slow_frames < 300) {
@@ -2365,6 +2371,18 @@ static bool sdlGlSwapWindow(void *window) {
         diagnosticsTrace("sdl.frame.summary frame=%u slowest_ms=%llu stalls=%u", frame, (unsigned long long)(slowest_swap_ns / 1000000u), frame_stalls);
         diagnosticsTrace("sdl.frame.pace frame=%u over17=%u over25=%u over33=%u over50=%u over100=%u max_ms=%u", frame, pace_17, pace_25,
                          pace_33, pace_50, pace_100, pace_max_ms);
+        {
+            char hist[512];
+            size_t used = 0;
+            for (unsigned bucket = 0; bucket < FRAME_HIST_BUCKETS && used + 12 < sizeof(hist); ++bucket) {
+                if (!frame_hist[bucket]) continue;
+                int wrote = snprintf(hist + used, sizeof(hist) - used, "%s%u:%u", used ? " " : "", bucket, frame_hist[bucket]);
+                if (wrote < 1) break;
+                used += (size_t)wrote;
+                frame_hist[bucket] = 0;
+            }
+            diagnosticsTrace("sdl.frame.hist frame=%u %s", frame, hist);
+        }
         diagnosticsTrace("gl.upload.pace frame=%u calls=%u cpu_ms=%llu", frame, atomic_load(&texture_upload_calls),
                          (unsigned long long)(atomic_load(&texture_upload_ns) / 1000000ull));
         unsigned drives = 0, drive_max_ms = 0;
