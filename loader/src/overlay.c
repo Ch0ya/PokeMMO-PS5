@@ -53,6 +53,7 @@ enum {
     GL_TEXTURE_WRAP_S = 0x2802,
     GL_TEXTURE_WRAP_T = 0x2803,
     GL_LINEAR = 0x2601,
+    GL_NEAREST = 0x2600,
     GL_CLAMP_TO_EDGE = 0x812F,
     GL_UNPACK_SWAP_BYTES = 0x0CF0,
     GL_UNPACK_LSB_FIRST = 0x0CF1,
@@ -435,15 +436,15 @@ void overlayDrawClientTexture(unsigned texture, unsigned width, unsigned height)
     overlayEnd();
 }
 
-// loader-70: capture the picture of the surface the client is drawing into (its default framebuffer is the current read
-// framebuffer) into the upscale texture. Used for a pbuffer: a render target, so the driver's blit is on its GPU path.
+// loader-73: NEAREST magnification, because the full-screen quad's cost tracks the fragment count and bilinear
+// sampling on a large texture; at 1.25x the difference is slight and the frame budget matters more.
 static bool captureBegin(unsigned width, unsigned height) {
     if (gl_state <= 0 || eglGetCurrentContext() == EGL_NO_CONTEXT) return false;
     if (width < 1 || height < 1) return false;
     if (!upscale_texture) gl.GenTextures(1, &upscale_texture);
     gl.BindTexture(GL_TEXTURE_2D, upscale_texture);
-    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     if (width != upscale_width || height != upscale_height) {
