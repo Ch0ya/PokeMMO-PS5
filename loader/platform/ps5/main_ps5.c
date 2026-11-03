@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-87"
+#define LOADER_MILESTONE "loader-88"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -899,19 +899,20 @@ static void *gameThread(void *argument) {
     atomic_store(&client_started_ns, platformMonotonicNs());
     mark("client.map", RUNNING);
     // loader-82: the client ran with a 640m heap and a 128m young generation - the smallest that a Switch-class port
-    // could get away with - and on this hardware that means the collector running constantly and, when it falls behind,
-    // pausing the whole client for 40-140 ms: the frame loss the player could see. The console has memory to spare, so the
-    // heap is three times larger and the young generation is big enough to absorb a zone load.
-    // The bundled runtime rejects pause-goal flags and -Xlog (loader-82's first build would not start: "Could not find
-    // option 'MaxGCPauseMillis'"), so only the two sizes it already accepted are passed.
-    // loader-87 (test builds only): /app0/jvm-flags holds extra arguments for the client's runtime, one per line. It is
-    // how the runtime's own option table is read (-XX:PrintFlags=) before another flag is passed to it: an unknown option
-    // stops the client before the menu, so guessing is not an option.
+    // could get away with. loader-88: this runtime's only collector is a Serial one (its own option list says "Serial GC
+    // only", and it rejects pause-goal flags), so the young generation is what a collection copies: 512m made each pause
+    // 40-140 ms, 32m makes it a few ms. The heap is committed at 1 GB so the collector is not chasing a growing heap
+    // through the first minutes of play, and -XX:+PrintGC puts every collection's pause in the log (client.err).
+    // The bundled runtime stops the client on an unknown option and its option-name field is 16 characters, so only
+    // options from its own printed table, with short names, are passed.
+    static const char *const fixed_options[] = {"-XX:MaxHeapSize=2048m", "-XX:MinHeapSize=1024m", "-XX:MaxNewSize=32m",
+                                                "-XX:+PrintGC"};
     static char extra_flags[4][120];
-    const char *options[8];
+    const char *options[10];
     unsigned option_count = 0;
-    options[option_count++] = "-XX:MaxHeapSize=2048m";
-    options[option_count++] = "-XX:MaxNewSize=512m";
+    for (unsigned i = 0; i < sizeof(fixed_options) / sizeof(fixed_options[0]); ++i) options[option_count++] = fixed_options[i];
+    // test builds: /app0/jvm-flags holds extra arguments for the client's runtime, one per line (a rejected option stops
+    // the client, so a new one is checked against the runtime's own printed table before it is passed here).
     FILE *flag_file = fopen("/app0/jvm-flags", "r");
     if (flag_file) {
         while (option_count + 1 < sizeof(options) / sizeof(options[0]) && fgets(extra_flags[option_count], sizeof(extra_flags[0]), flag_file)) {

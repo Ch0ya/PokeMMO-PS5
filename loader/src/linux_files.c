@@ -96,11 +96,24 @@ static int nativeClose(int fd) {
     int error = 0, saved = errno;
     return done("close", close(fd), saved, &error);
 }
+// loader-88: how much of the frame interval the client spends reading its own files. A zone change reads a batch of
+// archives, and a freeze during one is either that read (the loader can see it and cache or reorder it) or the client
+// parsing what it read (nothing here can help). The totals are only read when a stall is logged.
+static _Atomic unsigned long long file_read_calls, file_read_bytes, file_read_ns;
+void linuxFilesReadTotals(unsigned long long *calls, unsigned long long *bytes, unsigned long long *ns) {
+    if (calls) *calls = atomic_load(&file_read_calls);
+    if (bytes) *bytes = atomic_load(&file_read_bytes);
+    if (ns) *ns = atomic_load(&file_read_ns);
+}
 static int64_t nativeRead(int fd, void *buffer, size_t count, int *error) {
     int saved = errno;
     int64_t result = 0;
     if (count > INT_MAX) count = INT_MAX;  // partial transfer allowed, never narrow a huge count
+    uint64_t began = platformMonotonicNs();
     if (count) result = read(fd, buffer, count);
+    atomic_fetch_add(&file_read_ns, platformMonotonicNs() - began);
+    atomic_fetch_add(&file_read_calls, 1);
+    if (result > 0) atomic_fetch_add(&file_read_bytes, (unsigned long long)result);
     done("read", result, saved, error);
     return result;
 }

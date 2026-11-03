@@ -12,6 +12,7 @@
 #include "linux_audio.h"
 #include "linux_file_picker.h"
 #include "linux_format.h"
+#include "linux_files.h"
 #include "linux_threads.h"
 #include "linux_sdl_cursor.h"
 #include "linux_sdl_events.h"
@@ -1673,6 +1674,8 @@ static bool chooseGlConfig(EGLDisplay display, bool extras, EGLConfig *config, E
 static uint64_t last_swap_ns, slowest_swap_ns;
 static unsigned frame_stalls, slow_frames;
 static unsigned pace_17, pace_25, pace_33, pace_50, pace_100, pace_max_ms;
+// loader-88: the last frame's totals for the client's file reads and its texture uploads, for the stall breakdown.
+static unsigned long long stall_read_calls, stall_read_bytes, stall_read_ns, stall_upload_calls, stall_upload_ns;
 // loader-85: how the intervals are actually spread. The threshold counts say "late" but not "steadily late" (every frame
 // at 20 ms, which is a cadence the client's limiter chose) or "bimodal" (16.7 and 33.3, which is missed frames), and the
 // two need opposite fixes, so a 1 ms histogram of the window is logged with the counts.
@@ -1696,11 +1699,29 @@ static void noteFrameTime(uint64_t interval_ns, uint64_t present_ns, unsigned fr
         diagnosticsTrace("sdl.frame.slow frame=%u interval_ms=%llu present_ms=%llu", frame, (unsigned long long)(interval_ns / 1000000ull),
                          (unsigned long long)(present_ns / 1000000ull));
     }
+    // loader-88: what filled the interval: the client's own file reads, its texture uploads, or neither (its own parsing).
+    // The snapshot is taken every frame so a stalled interval's work is exactly the difference from the frame before it.
+    unsigned long long reads = 0, read_bytes = 0, read_ns = 0;
+    linuxFilesReadTotals(&reads, &read_bytes, &read_ns);
+    unsigned long long uploads = atomic_load(&texture_upload_calls), upload_ns = atomic_load(&texture_upload_ns);
+    // The upload counters restart every 600 frames, so a smaller reading means "just restarted", not a negative.
+    unsigned long long d_reads = reads >= stall_read_calls ? reads - stall_read_calls : 0;
+    unsigned long long d_read_bytes = read_bytes >= stall_read_bytes ? read_bytes - stall_read_bytes : 0;
+    unsigned long long d_read_ns = read_ns >= stall_read_ns ? read_ns - stall_read_ns : 0;
+    unsigned long long d_uploads = uploads >= stall_upload_calls ? uploads - stall_upload_calls : 0;
+    unsigned long long d_upload_ns = upload_ns >= stall_upload_ns ? upload_ns - stall_upload_ns : 0;
+    stall_read_calls = reads;
+    stall_read_bytes = read_bytes;
+    stall_read_ns = read_ns;
+    stall_upload_calls = uploads;
+    stall_upload_ns = upload_ns;
     if (frame <= 2 || (interval_ns <= 500000000ull && present_ns <= 250000000ull)) return;
     ++frame_stalls;
     if (frame_stalls <= 24 || frame_stalls % 100 == 0)
-        diagnosticsTrace("sdl.frame.stall frame=%u interval_ms=%llu present_ms=%llu stalls=%u", frame, (unsigned long long)(interval_ns / 1000000u),
-                         (unsigned long long)(present_ns / 1000000u), frame_stalls);
+        diagnosticsTrace("sdl.frame.stall frame=%u interval_ms=%llu present_ms=%llu stalls=%u reads=%llu read_ms=%llu read_kib=%llu "
+                         "uploads=%llu upload_ms=%llu",
+                         frame, (unsigned long long)(interval_ns / 1000000u), (unsigned long long)(present_ns / 1000000u), frame_stalls,
+                         d_reads, d_read_ns / 1000000ull, d_read_bytes / 1024ull, d_uploads, d_upload_ns / 1000000ull);
 }
 
 static void *sdlGlCreateContext(void *window) {

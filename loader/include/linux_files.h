@@ -43,6 +43,8 @@ bool linuxFilesReset(void);
 int linuxAbiOpen(const char *path, int flags, ...);
 int linuxAbiClose(int fd);
 int64_t linuxAbiRead(int fd, void *buffer, size_t count);
+// loader-88: totals for the client's own file reads (see linux_files.c): calls, bytes and the time spent inside them.
+void linuxFilesReadTotals(unsigned long long *calls, unsigned long long *bytes, unsigned long long *ns);
 int64_t linuxAbiWrite(int fd, const void *buffer, size_t count);
 int64_t linuxAbiLseek(int fd, int64_t offset, int whence);
 int64_t linuxAbiPread(int fd, void *buffer, size_t count, int64_t offset);
