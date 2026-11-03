@@ -1,6 +1,6 @@
 # PokeMMO on PS5
 
-**The official PokeMMO Linux client, running natively on a jailbroken PlayStation 5 — no streaming, no PC, no emulator layer in between.**
+**The un-official PokeMMO Linux client, running natively on a jailbroken PlayStation 5 — no streaming, no PC, no emulator layer in between.**
 
 This is a loader. It maps the real, unmodified PokeMMO client (a GraalVM native image built for Linux x86-64),
 gives it the Linux, SDL3, OpenGL, OpenAL and GTK pieces it asks for, and puts the client's own interface on
