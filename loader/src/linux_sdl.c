@@ -2336,8 +2336,10 @@ static bool sdlGlSwapWindow(void *window) {
     // frame ends, so the interval can be split into "computed" and "waited for something else".
     static uint64_t last_thread_cpu_ns;
     uint64_t thread_cpu = platformThreadCpuNs();
-    uint64_t frame_cpu_ns = thread_cpu >= last_thread_cpu_ns ? thread_cpu - last_thread_cpu_ns : 0;
+    uint64_t cpu_delta_ns = thread_cpu >= last_thread_cpu_ns ? thread_cpu - last_thread_cpu_ns : 0;
     last_thread_cpu_ns = thread_cpu;
+    static uint64_t thread_cpu_total_ns;
+    thread_cpu_total_ns = thread_cpu;
     unsigned w, h;
     screenSize(&w, &h);
     // loader-68: drain the client's own GL errors before the loader draws anything, so a log line says whose call failed.
@@ -2406,7 +2408,7 @@ static bool sdlGlSwapWindow(void *window) {
         client_surface_index = next;
     }
     unsigned frame = atomic_fetch_add(&frame_counter, 1) + 1;
-    noteFrameTime(last_swap_ns && ended > last_swap_ns ? ended - last_swap_ns : 0, ended > began ? ended - began : 0, frame_cpu_ns, frame);
+    noteFrameTime(last_swap_ns && ended > last_swap_ns ? ended - last_swap_ns : 0, ended > began ? ended - began : 0, cpu_delta_ns, frame);
     last_swap_ns = ended;
     if (frame % 60 == 0) checkGlErrors(frame, "swap");
     if (frame % 600 == 0) {
@@ -2425,9 +2427,9 @@ static bool sdlGlSwapWindow(void *window) {
             }
             diagnosticsTrace("sdl.frame.hist frame=%u %s", frame, hist);
         }
-        diagnosticsTrace("sdl.frame.cost frame=%u wall_ms=%llu cpu_ms=%llu wait_ms=%llu", frame,
+        diagnosticsTrace("sdl.frame.cost frame=%u wall_ms=%llu cpu_ms=%llu wait_ms=%llu thread_cpu_s=%llu", frame,
                          (unsigned long long)(frame_wall_ns / 1000000ull), (unsigned long long)(frame_cpu_ns / 1000000ull),
-                         (unsigned long long)(frame_wait_ns / 1000000ull));
+                         (unsigned long long)(frame_wait_ns / 1000000ull), (unsigned long long)(thread_cpu_total_ns / 1000000000ull));
         frame_wall_ns = frame_cpu_ns = frame_wait_ns = 0;
         diagnosticsTrace("gl.upload.pace frame=%u calls=%u cpu_ms=%llu", frame, atomic_load(&texture_upload_calls),
                          (unsigned long long)(atomic_load(&texture_upload_ns) / 1000000ull));

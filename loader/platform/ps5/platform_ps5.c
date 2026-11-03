@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/resource.h>
 
 // ---- system functions without public headers --------------------------------------------------------------------------------------
 int sceKernelUsleep(unsigned int microseconds);
@@ -159,13 +160,13 @@ uint64_t platformMonotonicNs(void) {
 }
 // loader-89: the calling thread's own CPU time. A frame interval with this much CPU was computed by the client; one with
 // far less was waiting (the server, a lock, the display), and the two need different answers.
-#ifndef CLOCK_THREAD_CPUTIME_ID
-#define CLOCK_THREAD_CPUTIME_ID 14  // FreeBSD's value, which this kernel follows
-#endif
+// loader-90: clock_gettime(CLOCK_THREAD_CPUTIME_ID) reads as zero here, so the thread's CPU is taken from getrusage,
+// which the kernel does provide (microsecond resolution).
 uint64_t platformThreadCpuNs(void) {
-    struct timespec now;
-    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now)) return 0;
-    return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+    struct rusage usage;
+    if (getrusage(RUSAGE_THREAD, &usage)) return 0;
+    return (uint64_t)usage.ru_utime.tv_sec * 1000000000u + (uint64_t)usage.ru_utime.tv_usec * 1000u +
+           (uint64_t)usage.ru_stime.tv_sec * 1000000000u + (uint64_t)usage.ru_stime.tv_usec * 1000u;
 }
 void platformSleepNs(uint64_t nanoseconds) {
     if (!nanoseconds) {
