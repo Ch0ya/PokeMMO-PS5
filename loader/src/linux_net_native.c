@@ -222,8 +222,21 @@ int64_t linuxNetNativeSend(int handle, const void *buffer, size_t count, int fla
         result = send(handle, buffer, count, native_flags);
     return result < 0 ? failure("send", error) : (int64_t)result;
 }
+// loader-89: how long the client sat inside a socket receive. A stall with no file reads, no uploads and no CPU of its
+// own is usually this: waiting for the server.
+static _Atomic unsigned long long net_recv_calls, net_recv_bytes, net_recv_ns;
+void linuxNetRecvTotals(unsigned long long *calls, unsigned long long *bytes, unsigned long long *ns) {
+    if (calls) *calls = atomic_load(&net_recv_calls);
+    if (bytes) *bytes = atomic_load(&net_recv_bytes);
+    if (ns) *ns = atomic_load(&net_recv_ns);
+}
 int64_t linuxNetNativeRecv(int handle, void *buffer, size_t count, int flags, BsdSockaddrIn *from, int *error) {
-    if (!(flags & BSD_MSG_DONTWAIT) && !readyOrAgain(handle, POLLIN, error)) return -1;
+    uint64_t began = platformMonotonicNs();
+    if (!(flags & BSD_MSG_DONTWAIT) && !readyOrAgain(handle, POLLIN, error)) {
+        atomic_fetch_add(&net_recv_ns, platformMonotonicNs() - began);
+        atomic_fetch_add(&net_recv_calls, 1);
+        return -1;
+    }
     int native_flags = nativeMessageFlags(flags) | (isEmulated(handle) ? MSG_DONTWAIT : 0);
     ssize_t result;
     if (from) {
@@ -233,6 +246,9 @@ int64_t linuxNetNativeRecv(int handle, void *buffer, size_t count, int flags, Bs
         if (result >= 0) fromNative(&native, from);
     } else
         result = recv(handle, buffer, count, native_flags);
+    atomic_fetch_add(&net_recv_ns, platformMonotonicNs() - began);
+    atomic_fetch_add(&net_recv_calls, 1);
+    if (result > 0) atomic_fetch_add(&net_recv_bytes, (unsigned long long)result);
     return result < 0 ? failure("recv", error) : (int64_t)result;
 }
 int linuxNetNativePoll(LinuxNetPollEntry *entries, unsigned count, int timeout_ms, int *error) {

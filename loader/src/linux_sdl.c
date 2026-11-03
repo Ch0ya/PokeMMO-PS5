@@ -13,6 +13,7 @@
 #include "linux_file_picker.h"
 #include "linux_format.h"
 #include "linux_files.h"
+#include "linux_net_native.h"
 #include "linux_threads.h"
 #include "linux_sdl_cursor.h"
 #include "linux_sdl_events.h"
@@ -1675,14 +1676,19 @@ static uint64_t last_swap_ns, slowest_swap_ns;
 static unsigned frame_stalls, slow_frames;
 static unsigned pace_17, pace_25, pace_33, pace_50, pace_100, pace_max_ms;
 // loader-88: the last frame's totals for the client's file reads and its texture uploads, for the stall breakdown.
-static unsigned long long stall_read_calls, stall_read_bytes, stall_read_ns, stall_upload_calls, stall_upload_ns;
+static unsigned long long stall_read_calls, stall_read_bytes, stall_read_ns, stall_upload_calls, stall_upload_ns, stall_recv_ns;
+static unsigned long long frame_wall_ns, frame_cpu_ns, frame_wait_ns;
 // loader-85: how the intervals are actually spread. The threshold counts say "late" but not "steadily late" (every frame
 // at 20 ms, which is a cadence the client's limiter chose) or "bimodal" (16.7 and 33.3, which is missed frames), and the
 // two need opposite fixes, so a 1 ms histogram of the window is logged with the counts.
 #define FRAME_HIST_BUCKETS 51u
 static unsigned frame_hist[FRAME_HIST_BUCKETS];
-static void noteFrameTime(uint64_t interval_ns, uint64_t present_ns, unsigned frame) {
+static void noteFrameTime(uint64_t interval_ns, uint64_t present_ns, uint64_t cpu_ns, unsigned frame) {
     if (interval_ns > slowest_swap_ns) slowest_swap_ns = interval_ns;
+    // loader-89: what the frame interval was made of: CPU time on the client's own thread, and the rest (waiting).
+    frame_wall_ns += interval_ns;
+    frame_cpu_ns += cpu_ns;
+    if (interval_ns > cpu_ns) frame_wait_ns += interval_ns - cpu_ns;
     if (frame > 2 && interval_ns) {
         unsigned ms = (unsigned)(interval_ns / 1000000ull);
         if (ms > pace_max_ms) pace_max_ms = ms;
@@ -1696,32 +1702,41 @@ static void noteFrameTime(uint64_t interval_ns, uint64_t present_ns, unsigned fr
     // Judder without a half-second stall: log the frame numbers so a hitch can be lined up with what the client was doing.
     if (frame > 2 && interval_ns > 40000000ull && slow_frames < 300) {
         ++slow_frames;
-        diagnosticsTrace("sdl.frame.slow frame=%u interval_ms=%llu present_ms=%llu", frame, (unsigned long long)(interval_ns / 1000000ull),
-                         (unsigned long long)(present_ns / 1000000ull));
+        diagnosticsTrace("sdl.frame.slow frame=%u interval_ms=%llu present_ms=%llu cpu_ms=%llu wait_ms=%llu", frame,
+                         (unsigned long long)(interval_ns / 1000000ull), (unsigned long long)(present_ns / 1000000ull),
+                         (unsigned long long)(cpu_ns / 1000000ull),
+                         (unsigned long long)((interval_ns > cpu_ns ? interval_ns - cpu_ns : 0) / 1000000ull));
     }
     // loader-88: what filled the interval: the client's own file reads, its texture uploads, or neither (its own parsing).
     // The snapshot is taken every frame so a stalled interval's work is exactly the difference from the frame before it.
     unsigned long long reads = 0, read_bytes = 0, read_ns = 0;
     linuxFilesReadTotals(&reads, &read_bytes, &read_ns);
+    unsigned long long recvs = 0, recv_bytes = 0, recv_ns = 0;
+    linuxNetRecvTotals(&recvs, &recv_bytes, &recv_ns);
     unsigned long long uploads = atomic_load(&texture_upload_calls), upload_ns = atomic_load(&texture_upload_ns);
     // The upload counters restart every 600 frames, so a smaller reading means "just restarted", not a negative.
     unsigned long long d_reads = reads >= stall_read_calls ? reads - stall_read_calls : 0;
     unsigned long long d_read_bytes = read_bytes >= stall_read_bytes ? read_bytes - stall_read_bytes : 0;
     unsigned long long d_read_ns = read_ns >= stall_read_ns ? read_ns - stall_read_ns : 0;
+    unsigned long long d_recv_ns = recv_ns >= stall_recv_ns ? recv_ns - stall_recv_ns : 0;
     unsigned long long d_uploads = uploads >= stall_upload_calls ? uploads - stall_upload_calls : 0;
     unsigned long long d_upload_ns = upload_ns >= stall_upload_ns ? upload_ns - stall_upload_ns : 0;
     stall_read_calls = reads;
     stall_read_bytes = read_bytes;
     stall_read_ns = read_ns;
+    stall_recv_ns = recv_ns;
     stall_upload_calls = uploads;
     stall_upload_ns = upload_ns;
     if (frame <= 2 || (interval_ns <= 500000000ull && present_ns <= 250000000ull)) return;
     ++frame_stalls;
     if (frame_stalls <= 24 || frame_stalls % 100 == 0)
-        diagnosticsTrace("sdl.frame.stall frame=%u interval_ms=%llu present_ms=%llu stalls=%u reads=%llu read_ms=%llu read_kib=%llu "
-                         "uploads=%llu upload_ms=%llu",
+        diagnosticsTrace("sdl.frame.stall frame=%u interval_ms=%llu present_ms=%llu stalls=%u cpu_ms=%llu wait_ms=%llu reads=%llu "
+                         "read_ms=%llu read_kib=%llu uploads=%llu upload_ms=%llu recv_ms=%llu",
                          frame, (unsigned long long)(interval_ns / 1000000u), (unsigned long long)(present_ns / 1000000u), frame_stalls,
-                         d_reads, d_read_ns / 1000000ull, d_read_bytes / 1024ull, d_uploads, d_upload_ns / 1000000ull);
+                         (unsigned long long)(cpu_ns / 1000000ull),
+                         (unsigned long long)((interval_ns > cpu_ns ? interval_ns - cpu_ns : 0) / 1000000ull), d_reads,
+                         d_read_ns / 1000000ull, d_read_bytes / 1024ull, d_uploads, d_upload_ns / 1000000ull,
+                         d_recv_ns / 1000000ull);
 }
 
 static void *sdlGlCreateContext(void *window) {
@@ -2317,6 +2332,12 @@ static bool sdlGlSwapWindow(void *window) {
     (void)window;
     if (egl_display == EGL_NO_DISPLAY || egl_surface == EGL_NO_SURFACE) return false;
     uint64_t began = platformMonotonicNs();
+    // loader-89: the CPU time this thread has used since the previous swap. Read here, at the one place the client's own
+    // frame ends, so the interval can be split into "computed" and "waited for something else".
+    static uint64_t last_thread_cpu_ns;
+    uint64_t thread_cpu = platformThreadCpuNs();
+    uint64_t frame_cpu_ns = thread_cpu >= last_thread_cpu_ns ? thread_cpu - last_thread_cpu_ns : 0;
+    last_thread_cpu_ns = thread_cpu;
     unsigned w, h;
     screenSize(&w, &h);
     // loader-68: drain the client's own GL errors before the loader draws anything, so a log line says whose call failed.
@@ -2385,7 +2406,7 @@ static bool sdlGlSwapWindow(void *window) {
         client_surface_index = next;
     }
     unsigned frame = atomic_fetch_add(&frame_counter, 1) + 1;
-    noteFrameTime(last_swap_ns && ended > last_swap_ns ? ended - last_swap_ns : 0, ended > began ? ended - began : 0, frame);
+    noteFrameTime(last_swap_ns && ended > last_swap_ns ? ended - last_swap_ns : 0, ended > began ? ended - began : 0, frame_cpu_ns, frame);
     last_swap_ns = ended;
     if (frame % 60 == 0) checkGlErrors(frame, "swap");
     if (frame % 600 == 0) {
@@ -2404,6 +2425,10 @@ static bool sdlGlSwapWindow(void *window) {
             }
             diagnosticsTrace("sdl.frame.hist frame=%u %s", frame, hist);
         }
+        diagnosticsTrace("sdl.frame.cost frame=%u wall_ms=%llu cpu_ms=%llu wait_ms=%llu", frame,
+                         (unsigned long long)(frame_wall_ns / 1000000ull), (unsigned long long)(frame_cpu_ns / 1000000ull),
+                         (unsigned long long)(frame_wait_ns / 1000000ull));
+        frame_wall_ns = frame_cpu_ns = frame_wait_ns = 0;
         diagnosticsTrace("gl.upload.pace frame=%u calls=%u cpu_ms=%llu", frame, atomic_load(&texture_upload_calls),
                          (unsigned long long)(atomic_load(&texture_upload_ns) / 1000000ull));
         unsigned drives = 0, drive_max_ms = 0;

@@ -157,6 +157,16 @@ uint64_t platformMonotonicNs(void) {
     clock_gettime(CLOCK_MONOTONIC, &now);
     return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
 }
+// loader-89: the calling thread's own CPU time. A frame interval with this much CPU was computed by the client; one with
+// far less was waiting (the server, a lock, the display), and the two need different answers.
+#ifndef CLOCK_THREAD_CPUTIME_ID
+#define CLOCK_THREAD_CPUTIME_ID 14  // FreeBSD's value, which this kernel follows
+#endif
+uint64_t platformThreadCpuNs(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now)) return 0;
+    return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+}
 void platformSleepNs(uint64_t nanoseconds) {
     if (!nanoseconds) {
         sched_yield();

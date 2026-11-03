@@ -21,6 +21,8 @@ void platformLogLine(const char *line);
 
 // ---- time and randomness ------------------------------------------------------------------------------------------------------
 uint64_t platformMonotonicNs(void);
+// loader-89: CPU time used by the calling thread (0 when the platform cannot say).
+uint64_t platformThreadCpuNs(void);
 void platformSleepNs(uint64_t nanoseconds);
 void platformYield(void);
 void platformRandom(void *buffer, size_t bytes);

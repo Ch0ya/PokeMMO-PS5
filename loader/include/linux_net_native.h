@@ -25,6 +25,8 @@ int linuxNetNativeGetsockopt(int handle, int level, int name, void *value, unsig
 int linuxNetNativeShutdown(int handle, int how, int *error);
 int64_t linuxNetNativeSend(int handle, const void *buffer, size_t count, int flags, const BsdSockaddrIn *to, int *error);
 int64_t linuxNetNativeRecv(int handle, void *buffer, size_t count, int flags, BsdSockaddrIn *from, int *error);
+// loader-89: totals for the client's socket receives (calls, bytes, and the time spent waiting in them).
+void linuxNetRecvTotals(unsigned long long *calls, unsigned long long *bytes, unsigned long long *ns);
 typedef struct {
     int handle;
     int16_t events, revents;
