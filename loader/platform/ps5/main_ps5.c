@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOADER_MILESTONE "loader-90"
+#define LOADER_MILESTONE "loader-91"
 // ps5-opengl's app heap (malloc of the loader and of everything the client allocates with malloc): from direct memory.
 const size_t ps5_opengl_heap_size = 768u << 20;
 
@@ -907,25 +907,9 @@ static void *gameThread(void *argument) {
     // options from its own printed table, with short names, are passed.
     static const char *const fixed_options[] = {"-XX:MaxHeapSize=2048m", "-XX:MinHeapSize=1024m", "-XX:MaxNewSize=32m",
                                                 "-XX:+PrintGC"};
-    static char extra_flags[4][120];
-    const char *options[10];
+    const char *options[sizeof(fixed_options) / sizeof(fixed_options[0]) + 1];
     unsigned option_count = 0;
     for (unsigned i = 0; i < sizeof(fixed_options) / sizeof(fixed_options[0]); ++i) options[option_count++] = fixed_options[i];
-    // test builds: /app0/jvm-flags holds extra arguments for the client's runtime, one per line (a rejected option stops
-    // the client, so a new one is checked against the runtime's own printed table before it is passed here).
-    FILE *flag_file = fopen("/app0/jvm-flags", "r");
-    if (flag_file) {
-        while (option_count + 1 < sizeof(options) / sizeof(options[0]) && fgets(extra_flags[option_count], sizeof(extra_flags[0]), flag_file)) {
-            char *text = extra_flags[option_count];
-            size_t length = strlen(text);
-            while (length && (text[length - 1] == '\n' || text[length - 1] == '\r' || text[length - 1] == ' ')) text[--length] = 0;
-            if (!length || text[0] == '#') continue;
-            options[option_count] = text;
-            say("client: extra runtime argument %s", text);
-            ++option_count;
-        }
-        fclose(flag_file);
-    }
     options[option_count] = NULL;
     char client_path[400];
     snprintf(client_path, sizeof(client_path), "%s/bin/linux/x64/PokeMMO", active_dir);
